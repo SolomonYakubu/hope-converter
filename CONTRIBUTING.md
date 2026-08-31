@@ -14,8 +14,13 @@ npm run dev
 ```
 
 You need Node.js 22 or newer and npm 10 or newer. `npm install` downloads the
-FFmpeg and ffprobe binaries through `ffmpeg-static` and `ffprobe-static`, so the
-first install needs network access.
+FFmpeg and ffprobe binaries through `ffmpeg-static` and
+`@ffprobe-installer/ffprobe`, so the first install needs network access. Those
+binaries match the machine that installed them, so packaged builds only work on
+the platform and architecture they were built on.
+
+Apple Silicon macOS is the only platform anyone has tested by hand. If you run
+Windows, Linux, or an Intel Mac, reports of what breaks are genuinely useful.
 
 ## Before you open a pull request
 

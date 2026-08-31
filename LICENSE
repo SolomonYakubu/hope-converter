@@ -23,7 +23,7 @@ SOFTWARE.
 ---
 
 This license covers the Hope Converter source code only. FFmpeg and ffprobe are
-obtained at install time through the `ffmpeg-static` and `ffprobe-static`
-packages and carry their own licenses, which may be more restrictive than MIT.
-Review those licenses before distributing packaged builds. See the "FFmpeg
-licensing" section of README.md.
+obtained at install time through the `ffmpeg-static` and
+`@ffprobe-installer/ffprobe` packages and carry their own licenses, which may be
+more restrictive than MIT. Review those licenses before distributing packaged
+builds. See the "FFmpeg licensing" section of README.md.
