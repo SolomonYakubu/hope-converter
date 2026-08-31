@@ -1,0 +1,14 @@
+node_modules/
+.npm-cache/
+out/
+release/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Local engineering notes, kept out of the public repository.
+chatlog.md
+implementation-plan.md

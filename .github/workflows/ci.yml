@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Downloads the FFmpeg and ffprobe binaries as part of the install.
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      # Confirms the bundled binaries actually run on this platform.
+      - run: npm run test:integration
+
+      - run: npm run build
