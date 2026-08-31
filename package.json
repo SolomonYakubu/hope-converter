@@ -47,7 +47,7 @@
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**/*",
-      "node_modules/ffprobe-static/**/*"
+      "node_modules/@ffprobe-installer/**/*"
     ],
     "mac": {
       "target": [
@@ -74,8 +74,8 @@
     }
   },
   "dependencies": {
+    "@ffprobe-installer/ffprobe": "2.1.2",
     "ffmpeg-static": "^5.3.0",
-    "ffprobe-static": "^3.1.0",
     "lucide-react": "^1.37.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

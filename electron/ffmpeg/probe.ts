@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import ffprobeStatic from 'ffprobe-static'
+import ffprobeInstaller from '@ffprobe-installer/ffprobe'
 import type { MediaMetadata } from '../types/conversion'
 import { unpackedBinaryPath } from './binary-path'
 
@@ -78,7 +78,7 @@ export async function probeDuration(
 
 async function runFFprobe(inputPath: string, dependencies: ProbeDependencies): Promise<string> {
   const spawnProcess = dependencies.spawn ?? spawn
-  const ffprobePath = unpackedBinaryPath(dependencies.ffprobePath ?? ffprobeStatic.path)
+  const ffprobePath = unpackedBinaryPath(dependencies.ffprobePath ?? ffprobeInstaller.path)
 
   return await new Promise<string>((resolve, reject) => {
     let child

@@ -37,7 +37,10 @@ function createWindow(): void {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
-      webSecurity: true
+      webSecurity: true,
+      // DevTools stay available while developing, but a shipped build should not
+      // hand out an inspector for the renderer.
+      devTools: !app.isPackaged
     }
   })
 
