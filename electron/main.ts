@@ -30,7 +30,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     show: false,
-    backgroundColor: '#0c0d0e',
+    backgroundColor: '#0b0810',
     icon: resolveWindowIcon(),
     webPreferences: {
       preload: join(currentDirectory, '../preload/preload.cjs'),

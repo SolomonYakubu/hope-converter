@@ -20,7 +20,7 @@ The application is functional end to end:
 - Hardware encoding and a configurable 1–4 job concurrency limit, persisted between launches
 - Codec-specific tuning for VideoToolbox, NVENC, QSV, VP9, x264, and x265
 - Single-viewport layout: the page never scrolls, only the file list and settings body do
-- Light and dark themes with a custom lime design system
+- Light and dark themes with a custom violet design system
 - About dialog carrying the FFmpeg version and the story behind the name
 - Secure, allowlisted IPC bridge
 - Unit tests for command generation, parsing, file handling, conversion lifecycle, hardware detection, settings persistence, and queue state, plus a separate integration suite

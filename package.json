@@ -55,7 +55,8 @@
         "zip"
       ],
       "icon": "resources/icon.png",
-      "category": "public.app-category.video"
+      "category": "public.app-category.video",
+      "identity": "-"
     },
     "win": {
       "target": [
