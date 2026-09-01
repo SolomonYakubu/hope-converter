@@ -27,7 +27,7 @@ The application is functional end to end:
 - Secure, allowlisted IPC bridge
 - Unit tests for command generation, parsing, file handling, conversion lifecycle, hardware detection, settings persistence, queue state, and the denoiser's command builder, asset digest verification, queue service and store, level staging, pre-gain, and streaming pump, plus a separate integration suite that drives the real FFmpeg binary and the real model — including a re-measurement of the model's lookahead delay and of what its attenuation limit means, proof that a fresh model state renders a file identically twice while a used one does not, and a multi-stream remux that must come out with its extra tracks and chapters intact, so a model or a container change that differs on any of it fails the build rather than quietly desyncing video, dropping tracks, rendering the second file in a queue differently from the first, or making the panel's percentages fiction
 
-Roadmap work still open: queue reordering, per-codec advanced options, named presets, output naming rules, keyboard shortcuts, metadata preservation, logging, auto-update, signing/notarization, and real-time microphone denoising.
+Roadmap work still open: queue reordering, per-codec advanced options, named presets, output naming rules, keyboard shortcuts, metadata preservation, logging, auto-update, and real-time microphone denoising. Signing and notarization are wired into the build but inert until certificates exist — see [Signing releases](#signing-releases).
 
 ## Platform support
 
@@ -57,7 +57,7 @@ Installers land in `release/`:
 - **Linux** — an AppImage and a `.deb` (`chmod +x` the AppImage before running it)
 - **macOS** — a `.dmg` and a `.zip`
 
-Builds produced this way are unsigned. Windows SmartScreen and macOS Gatekeeper will warn about an unidentified developer; on macOS, right-click the app and choose Open the first time. If a build fails, run `npm test` and `npm run test:integration` first — the integration suite spawns the real binaries and will tell you whether FFmpeg works on your machine at all.
+Builds produced this way are unsigned, because signing switches on only when credentials are present in the environment — see [Signing releases](#signing-releases). Windows SmartScreen and macOS Gatekeeper will warn about an unidentified developer. The macOS app is ad-hoc signed, which is enough to run on the machine that built it, but a copy carried to another Mac arrives quarantined; clear it with `xattr -dr com.apple.quarantine "/Applications/Hope Converter.app"`, which is more reliable on recent macOS than the right-click-Open trick. If a build fails, run `npm test` and `npm run test:integration` first — the integration suite spawns the real binaries and will tell you whether FFmpeg works on your machine at all.
 
 ## Development
 
@@ -94,7 +94,17 @@ npm run dist    # distributable targets for the current platform
 
 Both build for the host platform and architecture only. See [Platform support](#platform-support) for why cross-architecture builds do not work.
 
-Code signing and macOS notarization credentials are required for trusted public distribution but are not needed for local development builds.
+### Signing releases
+
+Build settings live in `electron-builder.cjs` rather than `package.json` so that signing can be conditional. Every credential arrives through the environment, and the config only decides which path to take from which variables are set. An empty environment produces the unsigned, ad-hoc-signed build described above; no local workflow changes when credentials appear.
+
+**macOS** needs an Apple Developer Program membership ($99/year) and a *Developer ID Application* certificate — not *Apple Distribution*, which is Mac App Store only and gets rejected for direct distribution. Set `CSC_LINK` (base64 `.p12`) and `CSC_KEY_PASSWORD`, or `CSC_NAME` for a certificate already in the login keychain. That alone stops the "unidentified developer" wording but not the warning; notarization is what removes it, and needs either `APPLE_API_KEY` (a *path* to the App Store Connect `.p8`, not its contents), `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`, or `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`. Hardened runtime and the entitlements Electron needs are already on by default; a custom plist would go at `resources/entitlements.mac.plist`, following `buildResources` rather than the `build/` the electron-builder docs assume. Verify a finished build with `codesign -dv --verbose=4`, `spctl -a -vvv -t install`, and `xcrun stapler validate`.
+
+**Windows** signing does not clear SmartScreen the way notarization clears Gatekeeper — EV certificates stopped bypassing it in 2024, so every option now accumulates reputation across consistently signed releases instead. Azure Artifact Signing, formerly Trusted Signing, is roughly $10/month and reads `AZURE_CODE_SIGNING_ENDPOINT`, `AZURE_CODE_SIGNING_ACCOUNT`, `AZURE_CODE_SIGNING_PROFILE`, and optionally `AZURE_PUBLISHER_NAME`, authenticating through `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET`; individual developers are limited to the US and Canada. A traditional signtool certificate goes in `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD` instead, though OV private keys have had to live on hardware since June 2023. [SignPath Foundation](https://signpath.io) signs qualifying open-source projects for free.
+
+Once a certificate is configured for a platform, `forceCodeSigning` makes a signing failure fail the build rather than quietly ship something the OS will reject.
+
+`.github/workflows/release.yml` reads all of this from repository secrets on a `v*` tag, builds each platform on its own runner, and collects the installers into a **draft** GitHub release. It succeeds with no secrets configured at all, so it can be merged before any certificate is bought.
 
 ## Architecture
 
