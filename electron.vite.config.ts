@@ -7,7 +7,12 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: resolve(__dirname, 'electron/main.ts')
+        // The denoiser runs in a worker thread, so it needs its own entry beside
+        // the main one. Both land in `out/main/`, which is how the service finds it.
+        input: {
+          main: resolve(__dirname, 'electron/main.ts'),
+          'denoise-worker': resolve(__dirname, 'electron/denoise/worker.ts')
+        }
       }
     }
   },

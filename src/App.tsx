@@ -1,19 +1,26 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent } from 'react'
 import { useStore } from 'zustand'
 import {
-  Check, ChevronRight, CircleAlert, FileAudio, FileCheck2, FileImage, FileVideo, Folder,
+  AudioLines, Check, ChevronRight, CircleAlert, FileCheck2, Folder,
   FolderOpen, Gauge, Info, Layers, LoaderCircle, ListVideo, Moon, Pause, Play, Plus,
   ShieldCheck, Sliders, Sparkles, Square, Sun, Trash2, UploadCloud, X, Zap
 } from 'lucide-react'
 import type { HardwareCapabilities, MediaKind } from '../electron/types/conversion'
+import { DENOISE_SAMPLE_RATE, type DenoiseEngineInfo } from '../electron/types/denoise'
 import logoUrl from './assets/logo.png'
+import { DenoisePanel } from './components/DenoisePanel'
+import { KindIcon } from './components/KindIcon'
 import { conversionStore, type Concurrency, type QueueItem, type QueueStatus } from './stores/conversion-store'
+import { denoiseStore } from './stores/denoise-store'
+import { describeAdditions } from './stores/queue-additions'
 import type { HopeConverterApi, InputFile } from './types/hope-converter'
 import { PausableGate, runWithConcurrency } from './utils/concurrency'
 import { createConversionOptions, createInputFileFromDrop, createOutputPath, FORMAT_OPTIONS, formatBytes } from './utils/conversion'
 import { describeMetadata } from './utils/media-summary'
 
 type Theme = 'light' | 'dark'
+/** The workspace shows one job at a time: converting files, or cleaning their audio. */
+type View = 'convert' | 'denoise'
 // `label` is the short header badge; `version` keeps FFmpeg's own banner for the
 // About dialog, which is where the project credit belongs.
 type FfmpegState = { state: 'checking' | 'ready' | 'unavailable'; label: string; version: string | null }
@@ -43,10 +50,12 @@ function App() {
   const queuePaused = useStore(conversionStore, (state) => state.queuePaused)
   const formats = useStore(conversionStore, (state) => state.formats)
   const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const [view, setView] = useState<View>('convert')
   const [isDragging, setIsDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [ffmpeg, setFfmpeg] = useState<FfmpegState>({ state: 'checking', label: 'Checking…', version: null })
   const [hardware, setHardware] = useState<HardwareCapabilities | null>(null)
+  const [denoiseEngine, setDenoiseEngine] = useState<DenoiseEngineInfo | null>(null)
   const [isStarting, setIsStarting] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -80,16 +89,35 @@ function App() {
       .then((version) => setFfmpeg({ state: 'ready', label: 'Engine ready', version }))
       .catch(() => setFfmpeg({ state: 'unavailable', label: 'FFmpeg unavailable', version: null }))
     void api.detectHardware().then(setHardware).catch(() => setHardware(null))
+    // The model is loading in the background; this reports whether it made it.
+    void api.getDenoiseInfo()
+      .then(setDenoiseEngine)
+      .catch((error: unknown) => setDenoiseEngine({
+        available: false,
+        frameLength: null,
+        sampleRate: DENOISE_SAMPLE_RATE,
+        reason: error instanceof Error ? error.message : 'The noise model could not be loaded.'
+      }))
 
     const unsubscribeProgress = api.onProgress((progress) => conversionStore.getState().updateProgress(progress))
     const unsubscribeComplete = api.onComplete(({ id, outputPath }) => conversionStore.getState().completeItem(id, outputPath))
     const unsubscribeCancelled = api.onCancelled(({ id }) => conversionStore.getState().setStatus(id, 'cancelled'))
     const unsubscribeError = api.onError(({ id, message }) => conversionStore.getState().setStatus(id, 'error', message))
+    // Denoise events are subscribed here rather than in the panel, so a job keeps
+    // reporting while the conversion view is showing.
+    const unsubscribeDenoiseProgress = api.onDenoiseProgress((progress) => denoiseStore.getState().updateProgress(progress))
+    const unsubscribeDenoiseComplete = api.onDenoiseComplete(({ id, outputPath }) => denoiseStore.getState().completeItem(id, outputPath))
+    const unsubscribeDenoiseCancelled = api.onDenoiseCancelled(({ id }) => denoiseStore.getState().setStatus(id, 'cancelled'))
+    const unsubscribeDenoiseError = api.onDenoiseError(({ id, message }) => denoiseStore.getState().setStatus(id, 'error', message))
     return () => {
       unsubscribeProgress()
       unsubscribeComplete()
       unsubscribeCancelled()
       unsubscribeError()
+      unsubscribeDenoiseProgress()
+      unsubscribeDenoiseComplete()
+      unsubscribeDenoiseCancelled()
+      unsubscribeDenoiseError()
     }
   }, [api])
 
@@ -107,9 +135,9 @@ function App() {
 
   function addFiles(files: InputFile[]) {
     const supported = files.filter((file) => file.path && file.kind)
-    conversionStore.getState().addFiles(supported)
+    const outcome = conversionStore.getState().addFiles(supported)
     if (supported.length !== files.length) setNotice('Some files could not be added because they were unsupported or had no local path.')
-    else setNotice(null)
+    else setNotice(describeAdditions(outcome))
   }
 
   async function browseFiles() {
@@ -300,17 +328,36 @@ function App() {
       <main className="workspace">
         <section className="intro">
           <div className="intro-title">
-            <span className="title-chip"><Zap size={22} strokeWidth={2.4} /></span>
+            <span className="title-chip">{view === 'convert' ? <Zap size={22} strokeWidth={2.4} /> : <AudioLines size={22} strokeWidth={2.4} />}</span>
             <div>
               <p className="eyebrow">Fast · Local · Yours</p>
-              <h1>Conversion workspace</h1>
+              <h1>{view === 'convert' ? 'Conversion workspace' : 'Audio cleanup'}</h1>
             </div>
+          </div>
+          <div className="view-tabs" role="tablist" aria-label="Workspace">
+            <button className={`view-tab ${view === 'convert' ? 'active' : ''}`} type="button" role="tab"
+              aria-selected={view === 'convert'} onClick={() => setView('convert')}>
+              <Zap size={15} /> Convert
+            </button>
+            <button className={`view-tab ${view === 'denoise' ? 'active' : ''}`} type="button" role="tab"
+              aria-selected={view === 'denoise'} onClick={() => setView('denoise')}>
+              <AudioLines size={15} /> Clean audio
+            </button>
           </div>
           <div className="privacy-card"><ShieldCheck size={20} /><div><strong>Your files stay on this device</strong><span>Every conversion runs locally with FFmpeg.</span></div></div>
         </section>
 
         {notice && <div className="notice" role="status"><CircleAlert size={17} /><span>{notice}</span><button type="button" onClick={() => setNotice(null)} aria-label="Dismiss message"><X size={16} /></button></div>}
 
+        {view === 'denoise' ? (
+          <DenoisePanel
+            api={api}
+            engine={denoiseEngine}
+            outputDirectory={outputDirectory}
+            onChooseOutputDirectory={chooseOutputDirectory}
+            onNotice={setNotice}
+          />
+        ) : (
         <div className="content-grid">
           <div className="main-column">
             <section className="stat-row" aria-label="Queue overview">
@@ -459,6 +506,7 @@ function App() {
             </div>
           </aside>
         </div>
+        )}
       </main>
 
       <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} ffmpegVersion={ffmpeg.version} />
@@ -510,12 +558,6 @@ function AboutDialog({ open, onClose, ffmpegVersion }: {
       </div>
     </dialog>
   )
-}
-
-function KindIcon({ kind }: { kind: MediaKind }) {
-  if (kind === 'video') return <FileVideo size={18} />
-  if (kind === 'audio') return <FileAudio size={18} />
-  return <FileImage size={18} />
 }
 
 // Decorative bar cluster that gives each summary card the dashboard's rhythm.

@@ -6,6 +6,14 @@ import type {
   MediaKind,
   MediaMetadata
 } from './conversion'
+import type {
+  DenoiseEngineInfo,
+  DenoisePreviewRequest,
+  DenoisePreviewResult,
+  DenoiseProgress,
+  DenoiseResult,
+  DenoiseStartRequest
+} from './denoise'
 
 export const IPC_CHANNELS = {
   convertFile: 'convert-file',
@@ -21,7 +29,15 @@ export const IPC_CHANNELS = {
   conversionProgress: 'conversion-progress',
   conversionComplete: 'conversion-complete',
   conversionCancelled: 'conversion-cancelled',
-  conversionError: 'conversion-error'
+  conversionError: 'conversion-error',
+  denoiseInfo: 'denoise-info',
+  denoiseFile: 'denoise-file',
+  cancelDenoise: 'cancel-denoise',
+  denoisePreview: 'denoise-preview',
+  denoiseProgress: 'denoise-progress',
+  denoiseComplete: 'denoise-complete',
+  denoiseCancelled: 'denoise-cancelled',
+  denoiseError: 'denoise-error'
 } as const
 
 export interface ConversionErrorPayload {
@@ -56,4 +72,12 @@ export interface HopeConverterAPI {
   onComplete: (listener: (result: ConversionResult) => void) => () => void
   onCancelled: (listener: (payload: ConversionCancelledPayload) => void) => () => void
   onError: (listener: (error: ConversionErrorPayload) => void) => () => void
+  getDenoiseInfo: () => Promise<DenoiseEngineInfo>
+  denoise: (request: DenoiseStartRequest) => Promise<void>
+  cancelDenoise: (id: string) => Promise<boolean>
+  previewDenoise: (request: DenoisePreviewRequest) => Promise<DenoisePreviewResult>
+  onDenoiseProgress: (listener: (progress: DenoiseProgress) => void) => () => void
+  onDenoiseComplete: (listener: (result: DenoiseResult) => void) => () => void
+  onDenoiseCancelled: (listener: (payload: ConversionCancelledPayload) => void) => () => void
+  onDenoiseError: (listener: (error: ConversionErrorPayload) => void) => () => void
 }

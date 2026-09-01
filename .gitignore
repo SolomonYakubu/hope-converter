@@ -12,3 +12,7 @@ coverage/
 # Local engineering notes, kept out of the public repository.
 chatlog.md
 implementation-plan.md
+
+# Downloaded by `npm run fetch:models` and verified against the digests pinned
+# in scripts/fetch-denoise-assets.mjs. Too large to track.
+resources/deepfilternet3/

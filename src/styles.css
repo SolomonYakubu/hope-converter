@@ -72,6 +72,25 @@ button, select, input { font: inherit; }
 button { color: inherit; }
 button:focus-visible, select:focus-visible, [role='button']:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
+/* Scrollbars are a grey 1px rule everywhere rather than an OS overlay pasted on top
+   of the design. Set globally because more than the two long lists scroll — the
+   about dialog and the preview panel do too. At this width it is an indicator, not
+   a handle: dragging it is impractical, so wheel, trackpad and keyboard carry the
+   scrolling. Grey rather than the brand fill so a scrolling list does not compete
+   with the controls in it, and `--subtle` rather than `--line-strong` because a 1px
+   line at 15% opacity is not visible at all.
+
+   Deliberately no `scrollbar-width`/`scrollbar-color`: since Chrome 121 those
+   standard properties override the WebKit pseudo-elements rather than falling back
+   to them, and `thin` is roughly 11px on macOS, so setting either one here would
+   throw the 1px away. The renderer is only ever Chromium, so the pseudo-elements
+   are the whole story. */
+::-webkit-scrollbar { width: 1px; height: 1px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--subtle); }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+::-webkit-scrollbar-corner { background: transparent; }
+
 /* The workspace is sized to the window: only the file list and the settings body
    scroll, so the page itself never does. */
 .app-shell {
@@ -112,6 +131,11 @@ h1 { margin: 0; font: 800 clamp(23px, 2.2vw, 29px)/1.1 ui-rounded, system-ui, sa
 .privacy-card > div { display: grid; gap: 1px; }
 .privacy-card strong { color: var(--text); font-size: 12px; }
 .privacy-card span { color: var(--muted); font-size: 10px; }
+/* One workspace, two jobs: converting files, or cleaning their audio. */
+.view-tabs { display: inline-flex; gap: 5px; padding: 5px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
+.view-tab { display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 16px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer; transition: color .2s, background .2s; }
+.view-tab:hover { color: var(--text); }
+.view-tab.active { color: var(--accent-ink); background: var(--fill); box-shadow: var(--glow); }
 .notice { display: flex; align-items: center; gap: 10px; border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--line)); color: var(--warning); background: var(--warning-soft); border-radius: var(--radius-md); padding: 13px 15px; font-size: 13px; }
 .notice span { flex: 1; }
 .notice button { border: 0; background: transparent; color: currentColor; display: grid; cursor: pointer; padding: 4px; border-radius: 999px; }
@@ -170,10 +194,7 @@ h2 { margin: 0; font: 700 15px/1.3 ui-rounded, system-ui, sans-serif; letter-spa
 .browse-button { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 18px; border-radius: 999px; font-weight: 700; font-size: 12px; color: var(--accent-ink); background: var(--fill); white-space: nowrap; }
 .visually-hidden { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 
-.file-list { min-height: 0; display: grid; gap: 10px; align-content: start; overflow-y: auto; padding-right: 5px; }
-.file-list::-webkit-scrollbar, .settings-body::-webkit-scrollbar { width: 8px; }
-.file-list::-webkit-scrollbar-thumb, .settings-body::-webkit-scrollbar-thumb { border-radius: 999px; background: var(--line-strong); }
-.file-list::-webkit-scrollbar-thumb:hover, .settings-body::-webkit-scrollbar-thumb:hover { background: var(--subtle); }
+.file-list { min-height: 0; display: grid; gap: 10px; align-content: start; overflow-y: auto; padding-right: 4px; }
 .queue-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; min-height: 84px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface-raised); transition: border-color .2s, transform .2s, box-shadow .2s; }
 .queue-row:hover { border-color: var(--line-strong); transform: translateY(-1px); box-shadow: var(--small-shadow); }
 .file-kind { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 999px; }
@@ -204,7 +225,7 @@ h2 { margin: 0; font: 700 15px/1.3 ui-rounded, system-ui, sans-serif; letter-spa
 .status-completed .file-kind { color: var(--accent-ink); background: var(--fill); }
 
 .settings-panel { min-height: 0; padding: 16px; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
-.settings-body { min-height: 0; overflow-y: auto; }
+.settings-body { min-height: 0; overflow-y: auto; padding-right: 4px; }
 .settings-panel .panel-heading { padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .setting-group { margin: 13px 0 0; padding: 0; border: 0; }
 .setting-group > .field-label, .setting-group > legend { display: block; padding: 0; margin-bottom: 9px; color: var(--subtle); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
@@ -237,6 +258,78 @@ h2 { margin: 0; font: 700 15px/1.3 ui-rounded, system-ui, sans-serif; letter-spa
 .folder-picker:hover { border-color: color-mix(in srgb, var(--brand) 42%, var(--line)); }
 .folder-picker span { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .folder-picker svg:last-child { color: var(--subtle); }
+
+/* Audio cleanup. The view borrows the queue and settings panels wholesale; only
+   the strength control and the before/after card are its own. */
+.denoise-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
+.denoise-column > .queue-panel { flex: 1; min-height: 0; }
+.settings-body > .notice { margin: 13px 0 0; font-size: 11px; }
+.setting-note { margin: 9px 2px 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.strength-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 11px; color: var(--subtle); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.strength-row label, .strength-row .field-inline { display: flex; align-items: center; gap: 6px; }
+.strength-row output, .strength-row .field-value { color: var(--brand); font-size: 11px; text-transform: none; }
+.strength-slider { width: 100%; height: 20px; margin: 0; background: transparent; -webkit-appearance: none; appearance: none; cursor: pointer; }
+.strength-slider::-webkit-slider-runnable-track { height: 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-soft); }
+.strength-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; margin-top: -6px; border: 2px solid var(--accent-ink); border-radius: 50%; background: var(--fill); box-shadow: var(--small-shadow); }
+.strength-slider:disabled { cursor: not-allowed; opacity: .45; }
+.strength-scale { display: flex; justify-content: space-between; margin-top: 3px; color: var(--subtle); font-size: 9px; }
+.preset-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 11px; }
+/* The label row already carries its own bottom margin, so the presets sit against it. */
+.strength-row + .preset-group { margin-top: 0; }
+/* The output level is one question with three answers, so it reads as a stack of
+   rows rather than a segmented pill: each answer needs its line of explanation more
+   than it needs to sit beside the others. Selected borrows the soft treatment used
+   for on-state toggles rather than the filled pill, because three tall filled rows
+   in a column shout. */
+.choice-group { display: grid; gap: 6px; }
+.choice-option { min-height: 46px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 15px; text-align: left; border: 1px solid var(--line); border-radius: 999px; color: var(--text); background: var(--surface-soft); cursor: pointer; transition: border-color .2s, box-shadow .2s, background .2s, color .2s; }
+.choice-option > span { min-width: 0; display: grid; gap: 2px; }
+.choice-option strong { font-size: 11px; font-weight: 600; }
+.choice-option small { color: var(--muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.choice-option:hover { border-color: color-mix(in srgb, var(--brand) 40%, var(--line)); }
+.choice-option.selected { border-color: color-mix(in srgb, var(--brand) 45%, transparent); color: var(--brand); background: var(--brand-soft); box-shadow: var(--glow); }
+.choice-option:disabled { cursor: not-allowed; opacity: .45; }
+/* The dB dials, folded away and closed on open. The presets above set them, and a
+   panel showing every number at once is what made this view hard to read. */
+.advanced-settings { margin-top: 18px; padding-top: 13px; border-top: 1px solid var(--line); }
+.advanced-settings > summary { display: flex; align-items: center; color: var(--subtle); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; cursor: pointer; list-style: none; }
+.advanced-settings > summary::-webkit-details-marker { display: none; }
+.advanced-settings > summary:hover { color: var(--brand); }
+.advanced-settings > summary::after { content: '⌄'; display: inline-block; margin-left: auto; line-height: 1; transition: transform .2s; }
+.advanced-settings[open] > summary::after { transform: rotate(180deg); }
+.quality-option:disabled { cursor: not-allowed; opacity: .45; }
+.row-actions button:disabled { color: var(--subtle); cursor: not-allowed; }
+.row-actions button:disabled:hover { background: transparent; border-color: transparent; }
+
+.preview-card { flex: 0 0 auto; padding: 15px 16px; display: grid; gap: 12px; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); box-shadow: var(--shadow); }
+.preview-head { display: flex; align-items: center; gap: 12px; }
+.preview-head > div { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.preview-head strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-head span { color: var(--muted); font-size: 10px; }
+/* A/B player. Both versions are drawn as stretched SVG envelopes stacked on one
+   timeline, so the playhead is a single element crossing both and a resize or a
+   theme change needs no redraw. */
+.ab-stage { position: relative; display: grid; gap: 7px; padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-soft); cursor: pointer; touch-action: none; }
+.ab-stage:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.ab-wave { display: grid; gap: 4px; }
+.ab-wave-label { display: flex; align-items: center; gap: 5px; color: var(--subtle); font-size: 9px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; transition: color .2s; }
+.ab-wave svg { display: block; width: 100%; height: 46px; fill: var(--line-strong); transition: fill .2s; }
+.ab-wave.active .ab-wave-label { color: var(--brand); }
+.ab-wave.active svg { fill: var(--brand); }
+/* Spans the waveforms but not their labels, which is why it is inset rather than full height. */
+.ab-playhead { position: absolute; top: 10px; bottom: 10px; width: 2px; margin-left: -1px; border-radius: 2px; background: var(--accent-ink); box-shadow: 0 0 0 1px rgba(7, 2, 16, .45); pointer-events: none; }
+.ab-transport { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ab-play { width: 42px; height: 42px; flex: 0 0 auto; display: grid; place-items: center; border: 0; border-radius: 999px; color: var(--accent-ink); background: var(--fill); cursor: pointer; box-shadow: var(--small-shadow); transition: background .2s; }
+.ab-play:hover { background: var(--fill-bright); }
+.ab-clock { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.ab-clock i { color: var(--subtle); font-style: normal; }
+.ab-switch { display: flex; margin-left: auto; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-soft); }
+.ab-switch button { padding: 0 13px; height: 30px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; transition: color .2s, background .2s; }
+.ab-switch button.selected { color: var(--accent-ink); background: var(--fill); }
+.ab-toggle { display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-soft); color: var(--muted); font-size: 10px; font-weight: 700; cursor: pointer; transition: color .2s, border-color .2s, background .2s; }
+.ab-toggle:hover { border-color: color-mix(in srgb, var(--brand) 40%, var(--line)); }
+.ab-toggle.on { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 45%, transparent); background: var(--brand-soft); }
+.ab-player kbd { padding: 1px 5px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-soft); color: var(--text); font-family: inherit; font-size: 9px; font-weight: 700; }
 
 .about-dialog { width: min(88vw, 396px); padding: 0; border: 0; background: transparent; color: var(--text); }
 .about-dialog::backdrop { background: rgba(6, 2, 14, .7); backdrop-filter: blur(5px); }
@@ -289,6 +382,8 @@ h2 { margin: 0; font: 700 15px/1.3 ui-rounded, system-ui, sans-serif; letter-spa
   .queue-panel, .settings-panel { border-radius: var(--radius-lg); padding: 15px; }
   .dropzone { grid-template-columns: 1fr; justify-items: center; text-align: center; }
   .queue-row { grid-template-columns: auto minmax(0, 1fr); }
+  /* The switch keeps its own row here, since the transport no longer fits one line. */
+  .ab-switch { margin-left: 0; }
   .row-actions { grid-column: 2; justify-self: end; margin-top: -38px; }
   .file-title { padding-right: 38px; }
   .status-pill { display: none; }

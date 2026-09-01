@@ -95,6 +95,54 @@ describe('conversion store', () => {
     store.getState().clearFinished()
     expect(store.getState().items.map((item) => item.id)).toEqual([active.id])
   })
+
+  it('queues a finished file again instead of dropping the pick as a duplicate', () => {
+    const store = createConversionStore()
+    store.getState().addFiles([video])
+    const id = store.getState().items[0].id
+    store.getState().completeItem(id, '/exports/demo-converted.mp4')
+
+    const outcome = store.getState().addFiles([video])
+
+    expect(outcome).toEqual({ added: 0, requeued: 1, alreadyQueued: 0 })
+    // The same row, reset — a second row would race the first for the output file.
+    expect(store.getState().items).toHaveLength(1)
+    expect(store.getState().items[0]).toMatchObject({ id, status: 'queued', progress: 0 })
+    expect(store.getState().items[0].outputPath).toBeUndefined()
+  })
+
+  it('clears the previous failure when a failed file is picked again', () => {
+    const store = createConversionStore()
+    store.getState().addFiles([video])
+    store.getState().setStatus(store.getState().items[0].id, 'error', 'Failed')
+
+    expect(store.getState().addFiles([video])).toMatchObject({ requeued: 1 })
+    expect(store.getState().items[0].error).toBeUndefined()
+  })
+
+  it('leaves a file that is still queued or running exactly as it is', () => {
+    const store = createConversionStore()
+    store.getState().addFiles([video])
+    store.getState().setStatus(store.getState().items[0].id, 'converting')
+    const before = store.getState().items
+
+    const outcome = store.getState().addFiles([video])
+
+    expect(outcome).toEqual({ added: 0, requeued: 0, alreadyQueued: 1 })
+    // Identity, not just equality: an unchanged queue must not re-render.
+    expect(store.getState().items).toBe(before)
+  })
+
+  it('reports a mixed pick so the caller can stay quiet about the useful part', () => {
+    const store = createConversionStore()
+    store.getState().addFiles([video])
+    store.getState().completeItem(store.getState().items[0].id, '/exports/demo-converted.mp4')
+
+    const outcome = store.getState().addFiles([video, { ...video, path: '/media/song.wav', name: 'song.wav', kind: 'audio' }])
+
+    expect(outcome).toEqual({ added: 1, requeued: 1, alreadyQueued: 0 })
+    expect(store.getState().items.map((item) => item.status)).toEqual(['queued', 'queued'])
+  })
 })
 
 describe('conversion request helpers', () => {

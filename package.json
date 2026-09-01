@@ -25,6 +25,8 @@
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
+    "fetch:models": "node scripts/fetch-denoise-assets.mjs",
+    "prebuild": "npm run fetch:models",
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
     "test": "vitest run",
@@ -48,6 +50,16 @@
     "asarUnpack": [
       "node_modules/ffmpeg-static/**/*",
       "node_modules/@ffprobe-installer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/deepfilternet3",
+        "to": "deepfilternet3",
+        "filter": [
+          "df_bg.wasm",
+          "DeepFilterNet3_onnx.tar.gz"
+        ]
+      }
     ],
     "mac": {
       "target": [

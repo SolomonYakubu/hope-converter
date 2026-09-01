@@ -7,6 +7,14 @@ import type {
   HardwareCapabilities,
   MediaMetadata
 } from './types/conversion'
+import type {
+  DenoiseEngineInfo,
+  DenoisePreviewRequest,
+  DenoisePreviewResult,
+  DenoiseProgress,
+  DenoiseResult,
+  DenoiseStartRequest
+} from './types/denoise'
 import {
   IPC_CHANNELS,
   type ConversionCancelledPayload,
@@ -52,7 +60,22 @@ const api: HopeConverterAPI = {
   onCancelled: (listener: (payload: ConversionCancelledPayload) => void) =>
     subscribe(IPC_CHANNELS.conversionCancelled, listener),
   onError: (listener: (error: ConversionErrorPayload) => void) =>
-    subscribe(IPC_CHANNELS.conversionError, listener)
+    subscribe(IPC_CHANNELS.conversionError, listener),
+  getDenoiseInfo: () => invoke<DenoiseEngineInfo>(IPC_CHANNELS.denoiseInfo),
+  denoise: async (request: DenoiseStartRequest) => {
+    await invoke<void>(IPC_CHANNELS.denoiseFile, request)
+  },
+  cancelDenoise: (id: string) => invoke<boolean>(IPC_CHANNELS.cancelDenoise, id),
+  previewDenoise: (request: DenoisePreviewRequest) =>
+    invoke<DenoisePreviewResult>(IPC_CHANNELS.denoisePreview, request),
+  onDenoiseProgress: (listener: (progress: DenoiseProgress) => void) =>
+    subscribe(IPC_CHANNELS.denoiseProgress, listener),
+  onDenoiseComplete: (listener: (result: DenoiseResult) => void) =>
+    subscribe(IPC_CHANNELS.denoiseComplete, listener),
+  onDenoiseCancelled: (listener: (payload: ConversionCancelledPayload) => void) =>
+    subscribe(IPC_CHANNELS.denoiseCancelled, listener),
+  onDenoiseError: (listener: (error: ConversionErrorPayload) => void) =>
+    subscribe(IPC_CHANNELS.denoiseError, listener)
 }
 
 contextBridge.exposeInMainWorld('hopeConverter', api)

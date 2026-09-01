@@ -1,6 +1,7 @@
 import { createStore } from 'zustand/vanilla'
 import type { ConversionProgress, MediaKind, MediaMetadata } from '../../electron/types/conversion'
 import type { InputFile } from '../types/hope-converter'
+import { isFinishedStatus, NO_ADDITIONS, type AddFilesResult } from './queue-additions'
 import {
   getBrowserStorage,
   loadRendererSettings,
@@ -27,7 +28,8 @@ export interface QueueItem extends InputFile {
 export interface ConversionState extends RendererSettings {
   items: QueueItem[]
   queuePaused: boolean
-  addFiles: (files: InputFile[]) => void
+  /** Adds files, reviving finished rows whose file was picked again. */
+  addFiles: (files: InputFile[]) => AddFilesResult
   removeItem: (id: string) => void
   setOutputDirectory: (directory: string | null) => void
   setQuality: (quality: QualityPreset) => void
@@ -71,16 +73,39 @@ export function createConversionStore(storage: StorageLike | null = getBrowserSt
       formats: { ...initialSettings.formats },
       items: [],
       queuePaused: false,
-      addFiles: (files) => set((state) => {
-        const paths = new Set(state.items.map((item) => item.path))
-        const additions = files.reduce<QueueItem[]>((result, file) => {
-          if (!file.path || paths.has(file.path)) return result
-          paths.add(file.path)
-          result.push({ ...file, id: createId(), status: 'queued', progress: 0 })
-          return result
-        }, [])
-        return { items: [...state.items, ...additions] }
-      }),
+      addFiles: (files) => {
+        let outcome = NO_ADDITIONS
+        set((state) => {
+          const existing = new Map(state.items.map((item) => [item.path, item]))
+          const additions: QueueItem[] = []
+          const revive = new Set<string>()
+          const blocked = new Set<string>()
+
+          for (const file of files) {
+            if (!file.path) continue
+            const match = existing.get(file.path)
+            if (!match) {
+              const item: QueueItem = { ...file, id: createId(), status: 'queued', progress: 0 }
+              existing.set(item.path, item)
+              additions.push(item)
+            } else if (isFinishedStatus(match.status)) revive.add(match.id)
+            else blocked.add(file.path)
+          }
+
+          outcome = { added: additions.length, requeued: revive.size, alreadyQueued: blocked.size }
+          // Nothing to change, so the queue keeps its identity and does not re-render.
+          if (!additions.length && !revive.size) return {}
+          return {
+            items: [
+              ...state.items.map((item) => revive.has(item.id)
+                ? { ...item, status: 'queued' as const, progress: 0, outputPath: undefined, error: undefined }
+                : item),
+              ...additions
+            ]
+          }
+        })
+        return outcome
+      },
       removeItem: (id) => set((state) => ({ items: state.items.filter((item) => item.id !== id) })),
       setOutputDirectory: (outputDirectory) => setAndPersist({ outputDirectory }),
       setQuality: (quality) => setAndPersist({ quality }),
@@ -109,7 +134,7 @@ export function createConversionStore(storage: StorageLike | null = getBrowserSt
           : item)
       })),
       clearFinished: () => set((state) => ({
-        items: state.items.filter((item) => !['completed', 'cancelled', 'error'].includes(item.status))
+        items: state.items.filter((item) => !isFinishedStatus(item.status))
       }))
     }
   })
