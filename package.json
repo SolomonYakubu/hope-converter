@@ -1,6 +1,6 @@
 {
   "name": "hope-converter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A secure, polished desktop media converter powered by FFmpeg.",
   "main": "out/main/main.js",
   "author": "Hope Converter contributors",
