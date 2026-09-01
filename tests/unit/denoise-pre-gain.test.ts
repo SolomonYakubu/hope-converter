@@ -5,6 +5,7 @@ import {
   PRE_GAIN_SILENCE_PEAK,
   PRE_GAIN_TARGET_PEAK,
   clampGainForPeak,
+  createGainStager,
   peakOf,
   preGainFor
 } from '../../electron/denoise/pre-gain'
@@ -91,5 +92,64 @@ describe('peakOf', () => {
 
   it('skips values that would poison every later frame', () => {
     expect(peakOf(floats([0.2, Number.NaN, 0.3, Number.POSITIVE_INFINITY]))).toBeCloseTo(0.3, 6)
+  })
+})
+
+describe('createGainStager', () => {
+  /** Steps a stager through frame peaks, collecting both halves of each pair. */
+  function run(delayFrames: number, calibratePeak: number, framePeaks: number[]) {
+    const stager = createGainStager(delayFrames)
+    stager.calibrate(calibratePeak)
+    const staged = framePeaks.map((peak) => stager.step(peak))
+    return { in: staged.map((pair) => pair.in), out: staged.map((pair) => pair.out) }
+  }
+
+  it('divides out the gain the samples went in at, not the one now in force', () => {
+    // A quiet opening, then a loud passage: the lift is pulled down at frame 4,
+    // while the samples coming back then went in at the old lift three frames ago.
+    const peaks = [0.02, 0.02, 0.02, 0.02, 0.6, 0.6, 0.6, 0.6]
+    const staged = run(3, 0.02, peaks)
+
+    expect(staged.out.slice(3)).toEqual(staged.in.slice(0, 5))
+    // Dividing by the current lift instead — 3.33 where 12.5 was applied — is what
+    // wrote that boundary 3.75x, or 11.5 dB, too loud.
+    expect(staged.in[0]).toBeCloseTo(12.5, 6)
+    expect(staged.in[4]).toBeCloseTo(PRE_GAIN_MODEL_CEILING / 0.6, 6)
+  })
+
+  it('starts the queue at 1, which only ever divides the warm-up frames the pump discards', () => {
+    expect(run(3, 0.02, [0.02, 0.02, 0.02]).out).toEqual([1, 1, 1])
+  })
+
+  it('never lifts more again once a louder passage has been seen', () => {
+    const staged = run(2, 0.01, [0.01, 0.5, 0.01, 0.02])
+    // The peak it clamps against only grows, so a quiet frame after a loud one
+    // keeps the reduced lift rather than climbing back up.
+    expect(staged.in[1]).toBeLessThan(staged.in[0] as number)
+    expect(staged.in.slice(1)).toEqual([staged.in[1], staged.in[1], staged.in[1]])
+  })
+
+  it('holds every frame it hands the model under the ceiling', () => {
+    const peaks = [0.005, 0.05, 0.3, 0.9, 1]
+    const staged = run(3, 0.005, peaks)
+    peaks.forEach((peak, index) => {
+      expect(peak * (staged.in[index] as number)).toBeLessThanOrEqual(PRE_GAIN_MODEL_CEILING + 1e-9)
+    })
+  })
+
+  it('lifts nothing at all when there is nothing but room tone', () => {
+    expect(run(3, PRE_GAIN_SILENCE_PEAK / 2, [0, 0, 0, 0]).in).toEqual([1, 1, 1, 1])
+  })
+
+  it('pairs a frame with itself when the model has no lookahead to undo', () => {
+    const staged = run(0, 0.02, [0.02, 0.6])
+    expect(staged.out).toEqual(staged.in)
+  })
+
+  it('never asks for more than the maximum lift, however quiet the opening', () => {
+    // Just above the room-tone floor, so this is a real measurement rather than
+    // one the silence rule declines to act on.
+    const barelyAudible = PRE_GAIN_SILENCE_PEAK * 1.01
+    expect(run(3, barelyAudible, [barelyAudible]).in[0]).toBeCloseTo(PRE_GAIN_MAX_FACTOR, 6)
   })
 })

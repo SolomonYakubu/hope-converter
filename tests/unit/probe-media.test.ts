@@ -46,8 +46,31 @@ describe('probeMedia', () => {
       height: 1080,
       fps: 30000 / 1001,
       audioSampleRate: 48000,
-      audioChannels: 2
+      audioChannels: 2,
+      // Counted, not just found: the cover art is a second video stream, and the
+      // denoise panel can only say what a remux leaves behind if it knows they exist.
+      videoTracks: 2,
+      audioTracks: 1
     })
+  })
+
+  it('counts subtitle tracks, which only the denoise panel asks about', async () => {
+    const data = JSON.stringify({
+      format: { duration: '60', format_name: 'matroska,webm' },
+      streams: [
+        { codec_type: 'video', codec_name: 'h264' },
+        { codec_type: 'audio', codec_name: 'aac', channels: 2 },
+        { codec_type: 'audio', codec_name: 'ac3', channels: 6 },
+        { codec_type: 'subtitle', codec_name: 'subrip' },
+        { codec_type: 'subtitle', codec_name: 'hdmv_pgs_subtitle' },
+        { codec_type: 'attachment', codec_name: 'ttf' }
+      ]
+    })
+
+    await expect(probeMedia('/media/film.mkv', {
+      spawn: fakeSpawn(data),
+      ffprobePath: '/ffprobe'
+    })).resolves.toMatchObject({ videoTracks: 1, audioTracks: 2, subtitleTracks: 2 })
   })
 
   it('safely omits malformed and zero-denominator numeric values', async () => {
@@ -58,10 +81,12 @@ describe('probeMedia', () => {
       }]
     })
 
+    // A count of zero is left out rather than reported: "no subtitles" and "not
+    // probed" are different things, and only the second one is unknown.
     await expect(probeMedia('/media/input.webm', {
       spawn: fakeSpawn(data),
       ffprobePath: '/ffprobe'
-    })).resolves.toEqual({ container: 'matroska,webm', videoCodec: 'vp9' })
+    })).resolves.toEqual({ container: 'matroska,webm', videoCodec: 'vp9', videoTracks: 1 })
   })
 
   it('keeps probeDuration compatibility through rich probing', async () => {

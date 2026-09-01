@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { DENOISE_DEFAULTS, DENOISE_LIFT_SPEECH_DB, createDenoiseStore, levelModeFor } from '../../src/stores/denoise-store'
+import { DENOISE_DEFAULTS, DENOISE_LIFT_SPEECH_DB, createDenoiseStore, denoiseOptionsFrom, levelModeFor } from '../../src/stores/denoise-store'
 import {
   DENOISE_MAX_ATTENUATION_DB,
   DENOISE_MAX_SPEECH_GAIN_DB,
+  DENOISE_POST_FILTER_BETA,
   originalShareForLimitDb
 } from '../../electron/types/denoise'
 import type { MediaMetadata } from '../../electron/types/conversion'
@@ -104,6 +105,18 @@ describe('denoise store', () => {
     expect(store.getState().items[0]).toMatchObject({ progress: 0, speed: null })
   })
 
+  it('keeps an unmeasurable percentage null rather than reporting a confident zero', () => {
+    // A file whose duration ffprobe could not read: the work is real and the clock
+    // moves, so rounding the unknown down to 0% would have the row claim a
+    // measurement it does not have for the whole run.
+    const { store, id } = seed()
+    store.getState().updateProgress({ id, percent: null, processedSeconds: 42, speed: 1.75 })
+
+    expect(store.getState().items[0]).toMatchObject({
+      status: 'processing', progress: null, processedSeconds: 42, speed: 1.75
+    })
+  })
+
   it('ignores progress for a file that is no longer queued', () => {
     const { store } = seed()
     store.getState().updateProgress({ id: 'gone', percent: 50, processedSeconds: 1, speed: 1 })
@@ -185,5 +198,53 @@ describe('denoise store', () => {
   it('counts an image as neither added nor blocked, since it never belonged here', () => {
     const { store } = seed()
     expect(store.getState().addFiles([cover])).toEqual({ added: 0, requeued: 0, alreadyQueued: 0 })
+  })
+})
+
+describe('denoiseOptionsFrom', () => {
+  it('turns the panel state into the engine settings, constant and all', () => {
+    // The panel used to spell 0.02 out itself, in a second place that could drift
+    // from the engine's own default. The switch means this constant and nothing else.
+    expect(denoiseOptionsFrom({ ...DENOISE_DEFAULTS, postFilter: true })).toEqual({
+      attenuationLimitDb: DENOISE_DEFAULTS.strength,
+      postFilterBeta: DENOISE_POST_FILTER_BETA,
+      speechGainDb: 0,
+      normalizeLoudness: false
+    })
+  })
+
+  it('sends no post-filter at all when the switch is off', () => {
+    expect(denoiseOptionsFrom({ ...DENOISE_DEFAULTS, postFilter: false }).postFilterBeta).toBe(0)
+  })
+
+  it('carries the level settings through untouched, for the engine to validate', () => {
+    // Deliberately not clamped here: the builder rejects a value out of range, and
+    // silently correcting one would hide a slider that had gone wrong.
+    expect(denoiseOptionsFrom({
+      ...DENOISE_DEFAULTS,
+      strength: DENOISE_MAX_ATTENUATION_DB,
+      speechGainDb: DENOISE_MAX_SPEECH_GAIN_DB,
+      normalizeLoudness: true
+    })).toMatchObject({
+      attenuationLimitDb: DENOISE_MAX_ATTENUATION_DB,
+      speechGainDb: DENOISE_MAX_SPEECH_GAIN_DB,
+      normalizeLoudness: true
+    })
+  })
+
+  it('reads only the settings, so the queue cannot change what the model is given', () => {
+    // It takes DenoiseSettings rather than the whole store state: the same panel
+    // settings must mean the same engine options for every row in the queue.
+    const { store } = seed()
+    store.getState().setStrength(18)
+    const state = store.getState()
+
+    expect(denoiseOptionsFrom(state)).toEqual(denoiseOptionsFrom({
+      strength: 18,
+      postFilter: state.postFilter,
+      speechGainDb: state.speechGainDb,
+      normalizeLoudness: state.normalizeLoudness,
+      audioFormat: state.audioFormat
+    }))
   })
 })

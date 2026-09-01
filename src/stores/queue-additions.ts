@@ -1,5 +1,6 @@
 /**
- * Shared rules for adding files to a queue that may already hold them.
+ * Shared rules for adding files to a queue that may already hold them, and the ids
+ * their rows are keyed by.
  *
  * Picking the same file twice is normal — a conversion is checked, the settings
  * are changed, the file is picked again. Dropping it as a duplicate makes the
@@ -12,6 +13,17 @@ const FINISHED_STATUSES: ReadonlySet<string> = new Set(['completed', 'error', 'c
 
 export function isFinishedStatus(status: string): boolean {
   return FINISHED_STATUSES.has(status)
+}
+
+/**
+ * The id a new row is keyed by, and the one the main process reports progress against.
+ *
+ * `randomUUID` needs a secure context, which the packaged app is and a plain-HTTP dev
+ * server would not be, so the fallback is what keeps a queue usable there rather than
+ * dead: `prefix` only makes those readable in a log, since a UUID carries no queue name.
+ */
+export function createId(prefix: string): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
 export interface AddFilesResult {

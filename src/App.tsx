@@ -2,14 +2,16 @@ import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEven
 import { useStore } from 'zustand'
 import {
   AudioLines, Check, ChevronRight, CircleAlert, FileCheck2, Folder,
-  FolderOpen, Gauge, Info, Layers, LoaderCircle, ListVideo, Moon, Pause, Play, Plus,
-  ShieldCheck, Sliders, Sparkles, Square, Sun, Trash2, UploadCloud, X, Zap
+  FolderOpen, Gauge, Layers, LoaderCircle, ListVideo, Moon, Pause, Play, Plus,
+  Settings, ShieldCheck, Sliders, Sparkles, Square, Sun, Trash2, UploadCloud, X, Zap
 } from 'lucide-react'
 import type { HardwareCapabilities, MediaKind } from '../electron/types/conversion'
 import { DENOISE_SAMPLE_RATE, type DenoiseEngineInfo } from '../electron/types/denoise'
-import logoUrl from './assets/logo.png'
+import { ACCENT_LOGOS } from './assets/logos'
+import { AppearanceSettings } from './components/AppearanceSettings'
 import { DenoisePanel } from './components/DenoisePanel'
 import { KindIcon } from './components/KindIcon'
+import { appearanceStore } from './stores/appearance-store'
 import { conversionStore, type Concurrency, type QueueItem, type QueueStatus } from './stores/conversion-store'
 import { denoiseStore } from './stores/denoise-store'
 import { describeAdditions } from './stores/queue-additions'
@@ -18,7 +20,6 @@ import { PausableGate, runWithConcurrency } from './utils/concurrency'
 import { createConversionOptions, createInputFileFromDrop, createOutputPath, FORMAT_OPTIONS, formatBytes } from './utils/conversion'
 import { describeMetadata } from './utils/media-summary'
 
-type Theme = 'light' | 'dark'
 /** The workspace shows one job at a time: converting files, or cleaning their audio. */
 type View = 'convert' | 'denoise'
 // `label` is the short header badge; `version` keeps FFmpeg's own banner for the
@@ -33,14 +34,6 @@ const QUALITY_OPTIONS = [
 ] as const
 const CONCURRENCY_OPTIONS: readonly Concurrency[] = [1, 2, 3, 4]
 
-function getInitialTheme(): Theme {
-  const stored = localStorage.getItem('hope-converter-theme')
-  if (stored === 'light' || stored === 'dark') return stored
-  // The brand palette is designed dark-first, so that is the default until the
-  // person picks otherwise.
-  return 'dark'
-}
-
 function App() {
   const items = useStore(conversionStore, (state) => state.items)
   const outputDirectory = useStore(conversionStore, (state) => state.outputDirectory)
@@ -49,7 +42,8 @@ function App() {
   const concurrency = useStore(conversionStore, (state) => state.concurrency)
   const queuePaused = useStore(conversionStore, (state) => state.queuePaused)
   const formats = useStore(conversionStore, (state) => state.formats)
-  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const theme = useStore(appearanceStore, (state) => state.theme)
+  const accent = useStore(appearanceStore, (state) => state.accent)
   const [view, setView] = useState<View>('convert')
   const [isDragging, setIsDragging] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
@@ -57,7 +51,7 @@ function App() {
   const [hardware, setHardware] = useState<HardwareCapabilities | null>(null)
   const [denoiseEngine, setDenoiseEngine] = useState<DenoiseEngineInfo | null>(null)
   const [isStarting, setIsStarting] = useState(false)
-  const [aboutOpen, setAboutOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const probedIds = useRef(new Set<string>())
   const queueGate = useMemo(() => new PausableGate(), [])
@@ -65,6 +59,7 @@ function App() {
   const api = typeof window !== 'undefined'
     ? window.hopeConverter as HopeConverterApi | undefined
     : undefined
+  const logoUrl = ACCENT_LOGOS[accent]
   const activeCount = items.filter((item) => item.status === 'converting').length
   const pausedCount = items.filter((item) => item.status === 'paused').length
   const completedCount = items.filter((item) => item.status === 'completed').length
@@ -74,10 +69,13 @@ function App() {
   const isRunning = activeCount + pausedCount > 0 || isStarting
   const mediaKinds = useMemo(() => [...new Set(items.map((item) => item.kind))], [items])
 
+  // The two attributes every colour in the stylesheet hangs off. Written here rather
+  // than in the store so the DOM stays the renderer's business and the store stays
+  // testable without one; the store has already persisted the choice by this point.
   useEffect(() => {
     document.documentElement.dataset.theme = theme
-    localStorage.setItem('hope-converter-theme', theme)
-  }, [theme])
+    document.documentElement.dataset.accent = accent
+  }, [theme, accent])
 
   useEffect(() => {
     if (!api) {
@@ -316,18 +314,20 @@ function App() {
               <span>{ffmpeg.label}</span>
             </div>
           )}
-          <button className="icon-button" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={`Use ${theme === 'dark' ? 'light' : 'dark'} theme`}>
+          <button className="icon-button" type="button" onClick={() => appearanceStore.getState().toggleTheme()} aria-label={`Use ${theme === 'dark' ? 'light' : 'dark'} theme`}>
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          <button className="icon-button" type="button" onClick={() => setAboutOpen(true)} aria-label="About Hope Converter">
-            <Info size={18} />
+          <button className="icon-button" type="button" onClick={() => setSettingsOpen(true)} aria-label="Settings and about">
+            <Settings size={18} />
           </button>
         </div>
       </header>
 
       <main className="workspace">
         <section className="intro">
-          <div className="intro-title">
+          {/* Keyed by view so the heading remounts with the page and fades in on the
+              same beat, rather than swapping a frame before it. */}
+          <div className="intro-title" key={view}>
             <span className="title-chip">{view === 'convert' ? <Zap size={22} strokeWidth={2.4} /> : <AudioLines size={22} strokeWidth={2.4} />}</span>
             <div>
               <p className="eyebrow">Fast · Local · Yours</p>
@@ -509,18 +509,24 @@ function App() {
         )}
       </main>
 
-      <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} ffmpegVersion={ffmpeg.version} />
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} ffmpegVersion={ffmpeg.version} />
     </div>
   )
 }
 
-// Keeps the FFmpeg credit and the story behind the name out of the workspace.
-function AboutDialog({ open, onClose, ffmpegVersion }: {
+/**
+ * Everything that is set once rather than per job: the theme and accent, and the credits
+ * that go with them. It is a dialog rather than a page because the workspace behind it is
+ * what the choice is being made against — an accent is judged by what it does to the
+ * window, and half the window stays visible.
+ */
+function SettingsDialog({ open, onClose, ffmpegVersion }: {
   open: boolean
   onClose: () => void
   ffmpegVersion: string | null
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
+  const accent = useStore(appearanceStore, (state) => state.accent)
 
   useEffect(() => {
     const dialog = dialogRef.current
@@ -535,26 +541,34 @@ function AboutDialog({ open, onClose, ffmpegVersion }: {
   }
 
   return (
-    <dialog className="about-dialog" ref={dialogRef} onClose={onClose} onClick={handleClick} aria-labelledby="about-title">
+    <dialog className="settings-dialog" ref={dialogRef} onClose={onClose} onClick={handleClick} aria-labelledby="settings-dialog-title">
       <div className="dialog-inner">
-        <button className="dialog-close" type="button" onClick={onClose} aria-label="Close about"><X size={16} /></button>
+        <button className="dialog-close" type="button" onClick={onClose} aria-label="Close settings"><X size={16} /></button>
 
-        <div className="about-head">
-          <span className="about-mark"><img src={logoUrl} alt="" width={54} height={54} /></span>
-          <h2 id="about-title">Hope Converter</h2>
-          <p>Private, local media conversion</p>
+        <div className="dialog-head">
+          {/* The mark is one of the things an accent changes, so it sits directly above
+              the swatches that change it. */}
+          <span className="dialog-mark"><img src={ACCENT_LOGOS[accent]} alt="" width={54} height={54} /></span>
+          <h2 id="settings-dialog-title">Settings</h2>
+          <p>Hope Converter · private, local media conversion</p>
         </div>
 
-        <p className="about-story">
-          Named after Hope. She kept needing to convert videos and kept ending up on
-          online tools — uploads, waiting, and her files sitting on someone else&apos;s
-          server. This app is that job done properly, on your own machine.
-        </p>
+        <div className="dialog-body">
+          <AppearanceSettings />
 
-        <dl className="about-facts">
-          <div><dt>Privacy</dt><dd>Files are read and written on this device. Nothing is uploaded.</dd></div>
-          <div><dt>Engine</dt><dd>{ffmpegVersion ?? 'FFmpeg was not detected on this system.'}</dd></div>
-        </dl>
+          <section className="setting-group">
+            <span className="field-label">About</span>
+            <p className="about-story">
+              Named after Hope. She kept needing to convert videos and kept ending up on
+              online tools — uploads, waiting, and her files sitting on someone else&apos;s
+              server. This app is that job done properly, on your own machine.
+            </p>
+            <dl className="about-facts">
+              <div><dt>Privacy</dt><dd>Files are read and written on this device. Nothing is uploaded.</dd></div>
+              <div><dt>Engine</dt><dd>{ffmpegVersion ?? 'FFmpeg was not detected on this system.'}</dd></div>
+            </dl>
+          </section>
+        </div>
       </div>
     </dialog>
   )

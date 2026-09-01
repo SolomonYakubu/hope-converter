@@ -1,13 +1,16 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   MODEL_FILENAME,
+  PINNED_ASSETS,
   WASM_FILENAME,
   checkAssets,
   loadAssets,
-  resolveAssetDirectory
+  resolveAssetDirectory,
+  type PinnedAsset
 } from '../../electron/denoise/assets'
 import { clampOptions } from '../../electron/denoise/engine'
 import { DENOISE_MAX_SPEECH_GAIN_DB } from '../../electron/types/denoise'
@@ -21,6 +24,25 @@ beforeEach(async () => {
 afterEach(async () => {
   if (directory) await rm(directory, { recursive: true, force: true })
 })
+
+/**
+ * A pinned entry for a stub file, so a case can exercise the real verification
+ * against a few bytes instead of the ~17 MB the shipped table describes.
+ */
+function pin(name: string, contents: string): PinnedAsset {
+  return {
+    name,
+    bytes: Buffer.byteLength(contents),
+    sha256: createHash('sha256').update(contents).digest('hex')
+  }
+}
+
+const STUBS = [pin(WASM_FILENAME, 'wasm'), pin(MODEL_FILENAME, 'model')]
+
+/** Writes each stub asset with the exact contents its pin was taken from. */
+async function writeStubs(contents: Record<string, string> = { [WASM_FILENAME]: 'wasm', [MODEL_FILENAME]: 'model' }) {
+  for (const [name, body] of Object.entries(contents)) await writeFile(join(directory, name), body)
+}
 
 describe('resolveAssetDirectory', () => {
   it('reads a packaged build from beside the app rather than inside the asar', () => {
@@ -39,39 +61,76 @@ describe('resolveAssetDirectory', () => {
   })
 })
 
+describe('PINNED_ASSETS', () => {
+  it('pins both runtime assets, in the order the loader returns them', () => {
+    expect(PINNED_ASSETS.map((asset) => asset.name)).toEqual([WASM_FILENAME, MODEL_FILENAME])
+  })
+
+  it('carries a size and a full SHA-256 for each, since a partial digest verifies nothing', () => {
+    for (const asset of PINNED_ASSETS) {
+      expect(asset.bytes).toBeGreaterThan(0)
+      expect(asset.sha256).toMatch(/^[0-9a-f]{64}$/)
+    }
+  })
+})
+
 describe('checkAssets', () => {
-  it('passes when both files are present and non-empty', async () => {
-    await writeFile(join(directory, WASM_FILENAME), 'wasm')
-    await writeFile(join(directory, MODEL_FILENAME), 'model')
-    expect(await checkAssets(directory)).toBeNull()
+  it('passes when both files are the files they are pinned to be', async () => {
+    await writeStubs()
+    expect(await checkAssets(directory, STUBS)).toBeNull()
   })
 
   it('names the missing file and how to get it', async () => {
-    const reason = await checkAssets(directory)
+    const reason = await checkAssets(directory, STUBS)
     expect(reason).toContain(WASM_FILENAME)
     expect(reason).toContain(directory)
     expect(reason).toContain('npm run fetch:models')
   })
 
   it('reports a half-finished download rather than letting the worker fail on it', async () => {
-    await writeFile(join(directory, WASM_FILENAME), 'wasm')
-    await writeFile(join(directory, MODEL_FILENAME), '')
-    expect(await checkAssets(directory)).toMatch(new RegExp(`${MODEL_FILENAME} is empty`))
+    await writeStubs({ [WASM_FILENAME]: 'wasm', [MODEL_FILENAME]: '' })
+    expect(await checkAssets(directory, STUBS)).toMatch(new RegExp(`${MODEL_FILENAME} is empty`))
+  })
+
+  it('reports a truncated file by the size it should have been', async () => {
+    await writeStubs({ [WASM_FILENAME]: 'wa', [MODEL_FILENAME]: 'model' })
+    expect(await checkAssets(directory, STUBS)).toBe(
+      `${WASM_FILENAME} is 2 bytes rather than the expected 4. Re-run "npm run fetch:models" to restore the pinned files.`
+    )
+  })
+
+  it('refuses a file swapped for a different one of the same size, which setup cannot catch', async () => {
+    // The digest is the whole point of re-checking at load time: this file is the
+    // right length and the wrong bytes, so only hashing tells it apart.
+    await writeStubs({ [WASM_FILENAME]: 'WASM', [MODEL_FILENAME]: 'model' })
+    expect(await checkAssets(directory, STUBS))
+      .toMatch(new RegExp(`${WASM_FILENAME} does not match its pinned SHA-256`))
+  })
+
+  it('checks the real shipped assets when no table is passed', async () => {
+    // The stubs are nothing like 9 MB, so the default table has to reject them —
+    // which is what proves the digests reach `checkAssets` rather than sitting unused.
+    await writeStubs()
+    expect(await checkAssets(directory)).toContain(WASM_FILENAME)
   })
 })
 
 describe('loadAssets', () => {
   it('returns both files as bytes', async () => {
-    await writeFile(join(directory, WASM_FILENAME), 'wasm-bytes')
-    await writeFile(join(directory, MODEL_FILENAME), 'model-bytes')
+    await writeStubs()
 
-    const assets = await loadAssets(directory)
-    expect(Buffer.from(assets.wasm).toString()).toBe('wasm-bytes')
-    expect(Buffer.from(assets.model).toString()).toBe('model-bytes')
+    const assets = await loadAssets(directory, STUBS)
+    expect(Buffer.from(assets.wasm).toString()).toBe('wasm')
+    expect(Buffer.from(assets.model).toString()).toBe('model')
   })
 
   it('throws the same reason the check reports', async () => {
-    await expect(loadAssets(directory)).rejects.toThrow(/npm run fetch:models/)
+    await expect(loadAssets(directory, STUBS)).rejects.toThrow(/npm run fetch:models/)
+  })
+
+  it('never hands a tampered asset to the engine', async () => {
+    await writeStubs({ [WASM_FILENAME]: 'wasm', [MODEL_FILENAME]: 'MODEL' })
+    await expect(loadAssets(directory, STUBS)).rejects.toThrow(/does not match its pinned SHA-256/)
   })
 })
 

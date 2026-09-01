@@ -13,6 +13,24 @@ export const DENOISE_MAX_CHANNELS = 2
  */
 export const DENOISE_MAX_SPEECH_GAIN_DB = 18
 
+/**
+ * Post-filter beta used when the post-filter is switched on.
+ *
+ * The post-filter re-shapes the per-band gains the model predicts, deepening the
+ * small ones relative to the large ones. Measured against the bundled model on a
+ * tone in noise, the effect is real but small: at the default 12 dB limit the
+ * residual floor drops 0.2 dB and the gaps between harmonics deepen 0.5 dB, at
+ * 18 dB it is 0.1 and 0.8 dB, and the speech level itself does not move. On clean
+ * speech the two settings differ by −66 dB, and at a limit of 0 they do not differ
+ * at all, since no gain mask is applied there. Upstream describes the trade as a
+ * little roughness on speech in exchange for that separation; these measurements
+ * cannot see roughness either way, so the panel does not promise it.
+ *
+ * 0.02 is upstream's own default; the useful range is 0–0.05 and the engine clamps
+ * to it.
+ */
+export const DENOISE_POST_FILTER_BETA = 0.02
+
 /** Integrated loudness the normalizer targets, in LUFS — the streaming convention for speech. */
 export const DENOISE_LOUDNESS_TARGET_LUFS = -16
 
@@ -66,13 +84,16 @@ export interface DenoiseOptions {
    */
   attenuationLimitDb: number
   /**
-   * Post-filter beta. Slightly sharpens the separation at the cost of some
-   * roughness on already-clean speech. 0 disables it; useful range is 0–0.05.
+   * Post-filter beta, which deepens the quietest bands the model keeps — a fraction
+   * of a dB either way (see {@link DENOISE_POST_FILTER_BETA} for the measurements).
+   * 0 disables it; useful range is 0–0.05, and {@link DENOISE_POST_FILTER_BETA} is
+   * what the switch in the panel means by on.
    */
   postFilterBeta: number
   /**
-   * Speech lift in dB, applied by FFmpeg after the model. 0 emits no filter at
-   * all, so the default path is byte-for-byte what it was before this existed.
+   * Speech lift in dB, applied by FFmpeg after the model. At 0 no `-af` reaches
+   * FFmpeg at all, so the samples the encoder receives are the model's own rather
+   * than a filter's idea of them.
    */
   speechGainDb: number
   /**
@@ -126,7 +147,12 @@ export interface DenoiseStartRequest {
 
 export interface DenoiseProgress {
   id: string
-  percent: number
+  /**
+   * Share of the file done, or null when its duration was never probed and there
+   * is no percentage to report. A file picked through the app always has one; this
+   * is the fallback for a source ffprobe could not measure.
+   */
+  percent: number | null
   processedSeconds: number
   /** Multiple of realtime, or null before the first measurable interval. */
   speed: number | null

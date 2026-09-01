@@ -130,6 +130,26 @@ function peak(samples: number[]): number {
   return largest
 }
 
+/**
+ * The worst factor by which any one written sample differs from the one that was
+ * read, in either direction. 1 means the file came back at the level it went in at
+ * everywhere, which is the claim; a peak comparison alone would miss a wrongly
+ * scaled stretch anywhere below the peak.
+ *
+ * Samples too small to divide by are skipped: a pass through f32 leaves rounding
+ * error there that says nothing about the gain staging.
+ */
+function worstRatio(output: number[], input: number[]): number {
+  let worst = 1
+  for (let index = 0; index < input.length; index++) {
+    const source = Math.abs(input[index] as number)
+    if (source < 1e-4) continue
+    const ratio = Math.abs(output[index] as number) / source
+    worst = Math.max(worst, ratio, 1 / ratio)
+  }
+  return worst
+}
+
 interface RunOptions {
   input: number[]
   delayFrames: number
@@ -256,9 +276,31 @@ describe('the denoise pump', () => {
     expect(peak(recording.seen)).toBeLessThanOrEqual(PRE_GAIN_MODEL_CEILING + 1e-6)
     // Still lifted: the clamp is a ceiling, not a retreat to no gain at all.
     expect(peak(recording.seen)).toBeGreaterThan(peak(loud))
-    // And the written level is the level that arrived, as ever.
-    expect(peak(output)).toBeCloseTo(peak(input), 5)
+    // And the written level is the level that arrived — every sample of it, not
+    // merely the loudest. A peak-only check cannot see a wrongly scaled stretch
+    // in the quiet part, which is exactly what this used to write.
+    expect(worstRatio(output, input)).toBeLessThanOrEqual(1 + 1e-5)
     expect(output).toHaveLength(input.length)
+  })
+
+  it('scales the samples just before a loud passage by the lift they went in at', async () => {
+    // The regression this case is named for: the lift falls as the loud passage
+    // arrives, but the samples coming back from the model then entered three frames
+    // earlier at the older, larger lift. Dividing the new one out of them wrote the
+    // 100 ms before the boundary up to 3.745x — 11.5 dB — too loud.
+    const quiet = testSignal(48_000 * 2, 0.02)
+    const loud = testSignal(48_000, 0.6)
+    const input = [...quiet, ...loud]
+    const output = await pumpThrough('gain-boundary', { input, delayFrames: 3, recording: { seen: [] } })
+
+    expect(output).toHaveLength(input.length)
+    expect(worstRatio(output, input)).toBeLessThanOrEqual(1 + 1e-5)
+
+    // Sample by sample across the boundary itself, where the ratio was worst.
+    const boundary = quiet.length
+    for (let index = boundary - FRAME_LENGTH * 12; index < boundary + FRAME_LENGTH * 4; index++) {
+      expect(output[index]).toBeCloseTo(input[index] as number, 6)
+    }
   })
 
   it('processes a file that is silent throughout without amplifying it', async () => {

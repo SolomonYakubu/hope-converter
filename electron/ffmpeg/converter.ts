@@ -8,6 +8,7 @@ import type {
   ConversionRequest,
   ConversionResult
 } from '../types/conversion'
+import { toError } from '../utils/guards'
 import { unpackedBinaryPath } from './binary-path'
 import { buildFFmpegArgs } from './command-builder'
 import { mapFFmpegError } from './errors'
@@ -264,8 +265,4 @@ export function temporaryOutputPath(outputPath: string): string {
 
 function validDuration(value: number | undefined): value is number {
   return value !== undefined && Number.isFinite(value) && value > 0
-}
-
-function toError(cause: unknown): Error {
-  return cause instanceof Error ? cause : new Error(String(cause))
 }

@@ -3,20 +3,28 @@ import type { MediaMetadata } from '../../electron/types/conversion'
 import {
   DENOISE_MAX_ATTENUATION_DB,
   DENOISE_MAX_SPEECH_GAIN_DB,
+  DENOISE_POST_FILTER_BETA,
   type DenoiseAudioFormat,
+  type DenoiseOptions,
   type DenoiseProgress
 } from '../../electron/types/denoise'
 import type { InputFile } from '../types/hope-converter'
-import { isFinishedStatus, NO_ADDITIONS, type AddFilesResult } from './queue-additions'
+import { createId, isFinishedStatus, NO_ADDITIONS, type AddFilesResult } from './queue-additions'
 
 export type DenoiseStatus = 'queued' | 'processing' | 'completed' | 'error' | 'cancelled'
 
 export interface DenoiseItem extends InputFile {
   id: string
   status: DenoiseStatus
-  progress: number
+  /** Percent done, or null while working on a file whose duration is unknown. */
+  progress: number | null
   /** Multiple of realtime while the file is being processed. */
   speed: number | null
+  /**
+   * Audio processed so far, in seconds. Shown in place of the percentage on a file
+   * with no probed duration, where it is the only honest measure of progress there is.
+   */
+  processedSeconds?: number
   outputPath?: string
   error?: string
   metadata?: MediaMetadata
@@ -36,7 +44,8 @@ export interface DenoiseSettings {
   /**
    * Speech lift in dB, applied after the model. A separate stage from `strength`:
    * the model decides how much noise goes, this decides how loud the voice lands.
-   * 0 leaves the level exactly as the model produced it.
+   * At 0 no level filter runs at all, so the encoder is handed the model's own
+   * samples.
    */
   speechGainDb: number
   /** Normalizes the finished file to the fixed loudness target (−16 LUFS). */
@@ -106,8 +115,20 @@ export const DENOISE_DEFAULTS: DenoiseSettings = {
   audioFormat: 'flac'
 }
 
-function createId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `denoise-${Date.now()}-${Math.random().toString(36).slice(2)}`
+/**
+ * The engine settings the current panel state amounts to.
+ *
+ * Kept here rather than inside the component so it can be tested without a DOM: it
+ * is the one place where a UI switch becomes a number the model is given, and
+ * `postFilter` is the switch that hides a constant behind a boolean.
+ */
+export function denoiseOptionsFrom(settings: DenoiseSettings): DenoiseOptions {
+  return {
+    attenuationLimitDb: settings.strength,
+    postFilterBeta: settings.postFilter ? DENOISE_POST_FILTER_BETA : 0,
+    speechGainDb: settings.speechGainDb,
+    normalizeLoudness: settings.normalizeLoudness
+  }
 }
 
 export function createDenoiseStore() {
@@ -127,7 +148,7 @@ export function createDenoiseStore() {
           if (!file.path || file.kind === 'image') continue
           const match = existing.get(file.path)
           if (!match) {
-            const item: DenoiseItem = { ...file, id: createId(), status: 'queued', progress: 0, speed: null }
+            const item: DenoiseItem = { ...file, id: createId('denoise'), status: 'queued', progress: 0, speed: null }
             existing.set(item.path, item)
             additions.push(item)
           } else if (isFinishedStatus(match.status)) revive.add(match.id)
@@ -140,7 +161,15 @@ export function createDenoiseStore() {
         return {
           items: [
             ...state.items.map((item) => revive.has(item.id)
-              ? { ...item, status: 'queued' as const, progress: 0, speed: null, outputPath: undefined, error: undefined }
+              ? {
+                  ...item,
+                  status: 'queued' as const,
+                  progress: 0,
+                  speed: null,
+                  processedSeconds: undefined,
+                  outputPath: undefined,
+                  error: undefined
+                }
               : item),
             ...additions
           ]
@@ -168,15 +197,30 @@ export function createDenoiseStore() {
     setAudioFormat: (audioFormat) => set({ audioFormat }),
     setStatus: (id, status, error) => set((state) => ({
       items: state.items.map((item) => item.id === id
-        ? { ...item, status, error, progress: status === 'queued' || status === 'processing' ? 0 : item.progress, speed: null }
+        ? {
+            ...item,
+            status,
+            error,
+            progress: status === 'queued' || status === 'processing' ? 0 : item.progress,
+            processedSeconds: status === 'queued' || status === 'processing' ? undefined : item.processedSeconds,
+            speed: null
+          }
         : item)
     })),
     setMetadata: (id, metadata) => set((state) => ({
       items: state.items.map((item) => item.id === id ? { ...item, metadata } : item)
     })),
-    updateProgress: ({ id, percent, speed }) => set((state) => ({
+    updateProgress: ({ id, percent, speed, processedSeconds }) => set((state) => ({
       items: state.items.map((item) => item.id === id
-        ? { ...item, status: 'processing', progress: Math.max(0, Math.min(100, percent)), speed }
+        ? {
+            ...item,
+            status: 'processing',
+            // null is not a missing measurement to round to zero: it means the file's
+            // duration is unknown, and the row shows an indeterminate bar instead.
+            progress: percent === null ? null : Math.max(0, Math.min(100, percent)),
+            processedSeconds,
+            speed
+          }
         : item)
     })),
     completeItem: (id, outputPath) => set((state) => ({

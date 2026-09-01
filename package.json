@@ -25,6 +25,8 @@
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
+    "accents": "node scripts/build-accents.mjs",
+    "logos": "node scripts/build-logos.mjs",
     "fetch:models": "node scripts/fetch-denoise-assets.mjs",
     "prebuild": "npm run fetch:models",
     "build": "npm run typecheck && electron-vite build",

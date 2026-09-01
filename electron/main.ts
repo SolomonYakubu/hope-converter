@@ -19,7 +19,9 @@ import type {
   DenoiseStartRequest
 } from './types/denoise'
 import { IPC_CHANNELS } from './types/ipc'
-import { classifyMedia, createOutputPath, isSupportedInput } from './utils/file'
+import { createOutputPath } from './utils/file'
+import { isRecord } from './utils/guards'
+import { classifyMedia, isSupportedInput } from './utils/media-kind'
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
 const converter = new ConverterService()
@@ -57,7 +59,10 @@ function createWindow(): void {
     minHeight: 600,
     fullscreen: true,
     show: false,
-    backgroundColor: '#0b0810',
+    // Matches --bg of the dark violet palette in src/styles.css, which is the palette
+    // the renderer starts in before it applies a stored theme or accent, so the first
+    // painted frame is not a different colour.
+    backgroundColor: '#16122a',
     icon: resolveWindowIcon(),
     webPreferences: {
       preload: join(currentDirectory, '../preload/preload.cjs'),
@@ -295,10 +300,6 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
 
 function assertSafePath(value: string, label: string): void {
   if (value.includes('\u0000')) throw new Error(`${label} contains an invalid character`)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function sendIfAvailable(sender: Electron.WebContents, channel: string, payload: unknown): void {

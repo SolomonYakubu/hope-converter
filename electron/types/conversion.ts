@@ -69,6 +69,15 @@ export interface MediaMetadata {
   fps?: number
   audioSampleRate?: number
   audioChannels?: number
+  /**
+   * Stream counts by type, absent when the file has none of that type.
+   *
+   * The denoise panel needs them to say which streams a remux will not carry, so
+   * a dropped subtitle track is named beforehand rather than discovered afterwards.
+   */
+  videoTracks?: number
+  audioTracks?: number
+  subtitleTracks?: number
 }
 
 export interface HardwareCapabilities {

@@ -13,15 +13,19 @@
  * complaint you would expect: syllables the model decides are not speech.
  *
  * The fix is to lift the audio into the range the model behaves well in, then
- * divide the same factor back out of its output. Because it is one scalar applied
- * and undone, the written file has the level it always had — the gain changes
- * what the model sees, never what anyone hears.
+ * divide the same factor back out of its output, so the written file has the level
+ * it always had — the gain changes what the model sees, never what anyone hears.
+ *
+ * "The same factor" is the whole difficulty, because the factor changes as the file
+ * goes by and the model answers three frames late. {@link createGainStager} is what
+ * keeps the two ends paired: it remembers the gain each frame went in at and hands
+ * it back when that frame's output arrives.
  */
 
 /** Where a lifted recording is aimed: -12 dBFS, healthy but far from clipping. */
 export const PRE_GAIN_TARGET_PEAK = 0.25
 /** Never lift by more than this. Beyond it the input is silence, not quiet speech. */
-export const PRE_GAIN_MAX_DB = 30
+const PRE_GAIN_MAX_DB = 30
 /** Never pull a hot recording down: the measurements are flat above -10 dBFS. */
 export const PRE_GAIN_MAX_FACTOR = 10 ** (PRE_GAIN_MAX_DB / 20)
 /** Below this the window holds no signal worth measuring — about -54 dBFS. */
@@ -58,9 +62,9 @@ export function preGainFor(peak: number): number {
  * Lowers a gain so that audio peaking at `peak` stays under the ceiling.
  *
  * Called with the loudest sample seen so far, which only grows, so the gain only
- * falls — and never below 1, since the level as recorded is always safe. Because
- * the same factor is divided back out of the model's output, a change here moves
- * what the model sees and not what is written.
+ * falls — and never below 1, since the level as recorded is always safe. A change
+ * here moves what the model sees; {@link createGainStager} is what makes sure it
+ * does not also move what is written.
  */
 export function clampGainForPeak(gain: number, peak: number): number {
   if (!Number.isFinite(peak) || peak <= 0) return gain
@@ -76,4 +80,53 @@ export function peakOf(samples: Buffer): number {
     if (Number.isFinite(value) && value > peak) peak = value
   }
   return peak
+}
+
+/** The pair of factors for one frame: what it goes in at, what comes out is divided by. */
+export interface StagedGain {
+  /** Multiplied into the frame on the way into the model. */
+  in: number
+  /** Divided out of the frame coming back, which entered `delayFrames` ago. */
+  out: number
+}
+
+export interface GainStager {
+  /** Sets the base lift from a peak measured over the opening window. */
+  calibrate: (peak: number) => void
+  /** Advances one frame, taking that frame's own peak before any lift. */
+  step: (framePeak: number) => StagedGain
+}
+
+/**
+ * Pairs each frame's lift with the output it belongs to.
+ *
+ * The model answers `delayFrames` frames late, so the samples coming back from it
+ * entered that many frames ago, at whatever lift was in force then — and the lift
+ * moves, because it is held down as louder passages arrive. Dividing the current
+ * lift out of them is what made a quiet passage just before a loud one come back up
+ * to 11.5 dB too loud. So the lift each frame went in at is queued, and the frame's
+ * output is divided by the value that comes back off the queue.
+ *
+ * The queue starts full of ones. Those cover the model's warm-up frames, which the
+ * pump discards to undo the lookahead, so they are never divided into anything that
+ * gets written.
+ */
+export function createGainStager(delayFrames: number): GainStager {
+  const depth = Math.max(0, Math.trunc(delayFrames))
+  const queued: number[] = new Array<number>(depth).fill(1)
+  let base = 1
+  /** Loudest sample seen so far, before any lift; only grows, so the lift only falls. */
+  let loudest = 0
+
+  return {
+    calibrate: (peak) => { base = preGainFor(peak) },
+
+    step: (framePeak) => {
+      if (Number.isFinite(framePeak) && framePeak > loudest) loudest = framePeak
+      const gainIn = clampGainForPeak(base, loudest)
+      queued.push(gainIn)
+      // Never empty: the queue is pre-filled to `depth` and one value is pushed per shift.
+      return { in: gainIn, out: queued.shift() as number }
+    }
+  }
 }

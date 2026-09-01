@@ -84,15 +84,22 @@ describe('buildAudioFilterChain', () => {
 })
 
 describe('buildEncodeArgs', () => {
-  it('writes lossless audio without a bitrate flag', () => {
+  it('writes lossless audio without a bitrate flag, at a depth it pins itself', () => {
     const args = buildEncodeArgs({ outputPath: '/out/voice-denoised.flac', channels: 1, kind: 'audio' })
     expect(args).toEqual([
       '-y', '-hide_banner', '-loglevel', 'error',
       '-f', 'f32le', '-ar', '48000', '-ac', '1', '-i', 'pipe:0',
-      '-c:a', 'flac',
+      // `s32` is FLAC's 24-bit mode. Stated rather than left to FFmpeg's own
+      // negotiation from f32le, so the depth cannot change with the binary.
+      '-c:a', 'flac', '-sample_fmt', 's32',
       '/out/voice-denoised.flac'
     ])
     expect(args).not.toContain('-b:a')
+  })
+
+  it('writes a WAV as 24-bit PCM, which is what makes calling it lossless true', () => {
+    expect(buildEncodeArgs({ outputPath: '/out/a.wav', channels: 2, kind: 'audio', audioFormat: 'wav' }))
+      .toEqual(expect.arrayContaining(['-c:a', 'pcm_s24le']))
   })
 
   it('defaults to FLAC when no audio format is given', () => {
@@ -109,7 +116,7 @@ describe('buildEncodeArgs', () => {
       .not.toContain('-b:a')
   })
 
-  it('copies the picture and metadata from the original when remuxing a video', () => {
+  it('copies the picture, chapters and metadata from the original when remuxing a video', () => {
     const args = buildEncodeArgs({
       outputPath: '/out/interview-denoised.mp4',
       channels: 2,
@@ -121,15 +128,57 @@ describe('buildEncodeArgs', () => {
       '-y', '-hide_banner', '-loglevel', 'error',
       '-f', 'f32le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0',
       '-i', input,
-      // The picture comes from the original, the sound from the model.
-      '-map', '1:v:0', '-map', '0:a:0',
-      '-map_metadata', '1',
+      // The picture comes from the original — every video stream of it, not just the
+      // first — and the sound from the model.
+      '-map', '1:v', '-map', '0:a:0',
+      // Chapters are their own list; `-map_metadata` does not carry them.
+      '-map_metadata', '1', '-map_chapters', '1',
       '-c:v', 'copy',
       '-c:a', 'aac',
       '-b:a', '192k',
       '-movflags', '+faststart',
       '/out/interview-denoised.mp4'
     ])
+    // MP4 cannot take arbitrary subtitles or a second audio codec, so nothing is
+    // asked of it that would fail the mux. The panel names what that leaves behind.
+    expect(args).not.toContain('1:s?')
+  })
+
+  it('carries the other audio tracks, subtitles and attachments into Matroska', () => {
+    const chain = buildAudioFilterChain({ speechGainDb: 6 })
+    const args = buildEncodeArgs({
+      outputPath: '/out/film-denoised.mkv',
+      channels: 2,
+      kind: 'video',
+      originalPath: '/in/film.mkv',
+      speechGainDb: 6
+    })
+
+    expect(args).toEqual([
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-f', 'f32le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0',
+      '-i', '/in/film.mkv',
+      '-map', '1:v', '-map', '0:a:0',
+      // Every remaining audio track except the one the cleaned stream replaces.
+      // The `?` keeps a file with nothing extra from failing the mux.
+      '-map', '1:a?', '-map', '-1:a:0', '-map', '1:s?', '-map', '1:t?',
+      '-map_metadata', '1', '-map_chapters', '1',
+      '-c:v', 'copy',
+      '-c:s', 'copy', '-c:t', 'copy',
+      // The cleaned track is output audio 0 because it was mapped first, so the
+      // per-stream forms name it while the carried tracks stay a plain copy.
+      // `-c:a copy` must come before `-c:a:0`: FFmpeg takes the last match.
+      '-filter:a:0', chain,
+      '-c:a', 'copy', '-c:a:0', 'aac', '-b:a:0', '192k',
+      '/out/film-denoised.mkv'
+    ])
+  })
+
+  it('rebuilds a container that cannot mux AAC as Matroska, extra streams and all', () => {
+    const args = buildEncodeArgs({
+      outputPath: '/out/clip-denoised.mkv', channels: 1, kind: 'video', originalPath: '/in/clip.avi'
+    })
+    expect(args).toEqual(expect.arrayContaining(['-map', '1:s?', '-c:a', 'copy', '-c:a:0', 'aac']))
   })
 
   it('picks the audio codec the target container accepts', () => {
@@ -223,7 +272,7 @@ describe('buildPreviewExtractArgs', () => {
       '-vn', '-sn', '-dn',
       '-ac', '2',
       '-ar', '48000',
-      '-c:a', 'pcm_s16le', '/tmp/preview-original.wav'
+      '-c:a', 'pcm_s24le', '/tmp/preview-original.wav'
     ])
     // This is the "before" half of the comparison, so no level stage may touch it.
     expect(args).not.toContain('-af')

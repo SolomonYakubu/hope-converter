@@ -12,11 +12,14 @@ import type {
   DenoiseResult
 } from '../types/denoise'
 
-/** Handed to the worker at construction; it never resolves these itself. */
+/**
+ * Handed to the worker at construction; it never resolves these itself. A worker
+ * serves one request and is then terminated, so this arrives once per request.
+ */
 export interface DenoiseWorkerData {
   assetDirectory: string
   ffmpegPath: string
-  /** Initial model settings, replaced per job. */
+  /** Seeds the state the worker loads before its request arrives, which then applies its own. */
   options: DenoiseOptions
 }
 

@@ -34,7 +34,13 @@ const VIDEO_FORMATS = new Set(['mp4', 'webm', 'mov'])
 const AUDIO_FORMATS = new Set(['mp3', 'wav', 'flac', 'm4a'])
 const IMAGE_FORMATS = new Set(['jpg', 'png', 'webp'])
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+/**
+ * Narrows a parsed stored payload to something whose keys can be read. Shared with
+ * `appearance-persistence.ts`, which reads its own key out of the same storage — the
+ * main process has its own copy in `electron/utils/guards.ts` rather than a renderer
+ * store reaching across the process boundary for three lines.
+ */
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 

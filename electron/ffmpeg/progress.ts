@@ -1,3 +1,5 @@
+import { clamp } from '../utils/guards'
+
 export interface ParsedProgress {
   frame: number | null
   timeSeconds: number
@@ -37,8 +39,4 @@ export function parseProgressBlock(block: string, durationSeconds: number): Pars
 function toFiniteNumber(value: string, fallback?: null): number | null {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : (fallback ?? 0)
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
 }

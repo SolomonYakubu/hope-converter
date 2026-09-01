@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import ffprobeInstaller from '@ffprobe-installer/ffprobe'
 import type { MediaMetadata } from '../types/conversion'
+import { assertPath, isRecord } from '../utils/guards'
 import { unpackedBinaryPath } from './binary-path'
 
 export type Spawn = typeof spawn
@@ -34,7 +35,7 @@ export async function probeMedia(
   inputPath: string,
   dependencies: ProbeDependencies = {}
 ): Promise<MediaMetadata> {
-  assertPath(inputPath)
+  assertPath(inputPath, 'input path')
 
   const output = await runFFprobe(inputPath, dependencies)
   let parsed: unknown
@@ -63,8 +64,17 @@ export async function probeMedia(
   if (fps !== undefined) metadata.fps = fps
   assignPositiveNumeric(metadata, 'audioSampleRate', audio?.sample_rate)
   assignPositiveNumber(metadata, 'audioChannels', audio?.channels)
+  // Counted rather than found: the panel reports what a remux will leave behind,
+  // which it can only do if it knows how many streams there were to begin with.
+  assignPositiveNumber(metadata, 'videoTracks', countOfType(streams, 'video'))
+  assignPositiveNumber(metadata, 'audioTracks', countOfType(streams, 'audio'))
+  assignPositiveNumber(metadata, 'subtitleTracks', countOfType(streams, 'subtitle'))
 
   return metadata
+}
+
+function countOfType(streams: FFprobeStream[], type: string): number {
+  return streams.reduce((total, stream) => stream.codec_type === type ? total + 1 : total, 0)
 }
 
 export async function probeDuration(
@@ -152,13 +162,4 @@ function assignPositiveNumeric<K extends keyof MediaMetadata>(
     return
   }
   assignPositiveNumber(target, key, value)
-}
-
-function assertPath(value: string): void {
-  if (!value.trim()) throw new Error('input path cannot be empty')
-  if (value.includes('\u0000')) throw new Error('input path contains an invalid character')
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

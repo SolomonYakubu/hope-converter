@@ -1,26 +1,11 @@
-import { extname, join, parse } from 'node:path'
-import type { MediaKind } from '../types/conversion'
-
-const SUPPORTED_EXTENSIONS: Record<MediaKind, ReadonlySet<string>> = {
-  video: new Set(['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'flv', 'wmv']),
-  audio: new Set(['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus', 'wma']),
-  image: new Set(['jpg', 'jpeg', 'png', 'webp', 'heic', 'tif', 'tiff', 'bmp', 'gif'])
-}
-
-export function classifyMedia(filePath: string): MediaKind | null {
-  const extension = extname(filePath).slice(1).toLowerCase()
-  if (!extension) return null
-
-  for (const [kind, extensions] of Object.entries(SUPPORTED_EXTENSIONS) as [MediaKind, ReadonlySet<string>][]) {
-    if (extensions.has(extension)) return kind
-  }
-
-  return null
-}
-
-export function isSupportedInput(filePath: string): boolean {
-  return classifyMedia(filePath) !== null
-}
+/**
+ * Where a converted file is written, and under what name.
+ *
+ * Which files the app will open in the first place is `media-kind.ts`, which is kept
+ * free of Node imports so the renderer can share it. This half cannot be: naming an
+ * output is path work, and path work belongs to the process that owns the disk.
+ */
+import { join, parse } from 'node:path'
 
 export function createOutputPath(
   inputPath: string,

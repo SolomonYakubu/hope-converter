@@ -1,20 +1,24 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import { useStore } from 'zustand'
 import {
-  AudioLines, Check, ChevronRight, CircleAlert, Folder, FolderOpen, Headphones, LoaderCircle,
-  Plus, RotateCcw, Sliders, Square, Trash2, UploadCloud, WandSparkles
+  AudioLines, Check, ChevronDown, ChevronRight, CircleAlert, Folder, FolderOpen, Headphones,
+  LoaderCircle, Plus, RotateCcw, Sliders, Square, Trash2, UploadCloud, WandSparkles
 } from 'lucide-react'
 import {
   DENOISE_LOUDNESS_TARGET_LUFS,
   DENOISE_MAX_ATTENUATION_DB,
+  DENOISE_MAX_CHANNELS,
   DENOISE_MAX_SPEECH_GAIN_DB,
   originalShareForLimitDb,
   type DenoiseAudioFormat,
   type DenoiseEngineInfo,
   type DenoiseOptions
 } from '../../electron/types/denoise'
+// The same table the encoder builds its arguments from, so a row's note about
+// dropped streams cannot drift from what the remux actually does.
+import { videoContainerForExtension } from '../../electron/denoise/containers'
 import {
-  denoiseStore, levelModeFor,
+  denoiseOptionsFrom, denoiseStore, levelModeFor,
   type DenoiseItem, type DenoiseLevelMode, type DenoiseStatus
 } from '../stores/denoise-store'
 import { describeAdditions } from '../stores/queue-additions'
@@ -22,13 +26,14 @@ import type { HopeConverterApi, InputFile } from '../types/hope-converter'
 import { decodeAudio } from '../utils/audio-graph'
 import { createInputFileFromDrop, formatBytes } from '../utils/conversion'
 import { describeMetadata } from '../utils/media-summary'
+import { formatClock } from '../utils/waveform'
 import { AbPlayer } from './AbPlayer'
 import { KindIcon } from './KindIcon'
 
 /** Long enough to judge the difference, short enough to render in a moment. */
 const PREVIEW_SECONDS = 8
 const FORMAT_OPTIONS: readonly { value: DenoiseAudioFormat; label: string }[] = [
-  { value: 'flac', label: 'FLAC · lossless' }, { value: 'wav', label: 'WAV · lossless' },
+  { value: 'flac', label: 'FLAC · lossless, 24-bit' }, { value: 'wav', label: 'WAV · 24-bit PCM' },
   { value: 'mp3', label: 'MP3' }, { value: 'm4a', label: 'M4A' }
 ]
 // The model's own strength dial, in dB of allowed attenuation — which is the same
@@ -126,13 +131,7 @@ export function DenoisePanel({ api, engine, outputDirectory, onChooseOutputDirec
   }, [api, items])
 
   function currentOptions(): DenoiseOptions {
-    const state = denoiseStore.getState()
-    return {
-      attenuationLimitDb: state.strength,
-      postFilterBeta: state.postFilter ? 0.02 : 0,
-      speechGainDb: state.speechGainDb,
-      normalizeLoudness: state.normalizeLoudness
-    }
+    return denoiseOptionsFrom(denoiseStore.getState())
   }
 
   function addFiles(files: InputFile[]) {
@@ -196,7 +195,7 @@ export function DenoisePanel({ api, engine, outputDirectory, onChooseOutputDirec
 
     const options = currentOptions()
     const format = denoiseStore.getState().audioFormat
-    // The worker processes one file at a time, so the whole batch can be handed
+    // The main process runs one file at a time, so the whole batch can be handed
     // over at once: each row waits at "Ready" until its own turn comes up.
     await Promise.all(pending.map(async (item) => {
       denoiseStore.getState().setStatus(item.id, 'queued')
@@ -243,7 +242,8 @@ export function DenoisePanel({ api, engine, outputDirectory, onChooseOutputDirec
     if (!api) return
     try {
       const stopped = await api.cancelDenoise(item.id)
-      // A file the worker never received is only queued here, so it is dropped locally.
+      // If the main process has no record of it, the row exists only here, so it is
+      // dropped locally rather than left waiting for a reply that cannot come.
       if (stopped || item.status === 'queued') denoiseStore.getState().setStatus(item.id, 'cancelled')
     } catch (error) {
       onNotice(describe(error, 'Could not stop this cleanup.'))
@@ -375,7 +375,7 @@ export function DenoisePanel({ api, engine, outputDirectory, onChooseOutputDirec
             </div>
             <p className="setting-note">
               {strength === 0
-                ? 'Off: the soundtrack is written exactly as it arrived. '
+                ? 'Off: the model leaves the samples alone, though the soundtrack is still decoded to 48 kHz and re-encoded. '
                 : `Keeps ${originalSharePercent(strength)}% of the original underneath, which is what protects a breath or a trailing consonant. `}
               Built for speech — preview one file before running a batch of music.
             </p>
@@ -408,7 +408,13 @@ export function DenoisePanel({ api, engine, outputDirectory, onChooseOutputDirec
                 {FORMAT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
             </label>
-            <p className="setting-note">A video keeps its own container and its picture is copied untouched — only the soundtrack is re-encoded.</p>
+            <p className="setting-note">Cleaned audio is written at the model's 48 kHz in the format above.</p>
+            <p className="setting-note">
+              A video has its picture, chapters and tags copied straight across and only its
+              soundtrack re-encoded. MKV also carries the other audio tracks, subtitles and
+              attachments; MP4, MOV and WebM cannot, and AVI, FLV and WMV are rebuilt as MKV.
+              Each file's row says what its own cleanup will leave behind.
+            </p>
           </div>
 
           <div className="setting-group">
@@ -420,8 +426,8 @@ export function DenoisePanel({ api, engine, outputDirectory, onChooseOutputDirec
 
           {/* The dB dials themselves, folded away: the presets above set them, and
               nothing here is needed to get a good result out of an ordinary file. */}
-          <details className="advanced-settings">
-            <summary>Fine controls</summary>
+          <details className="advanced-settings" onToggle={(event) => revealDisclosure(event.currentTarget)}>
+            <summary>Fine controls<ChevronDown size={15} aria-hidden="true" /></summary>
 
             <div className="setting-group">
               <div className="strength-row">
@@ -452,7 +458,7 @@ export function DenoisePanel({ api, engine, outputDirectory, onChooseOutputDirec
             <div className="setting-group">
               <label className={`performance-option ${postFilter ? 'enabled' : ''}`}>
                 <span className="performance-icon"><AudioLines size={18} /></span>
-                <span><strong>Post-filter</strong><small>Cleaner separation, slightly rougher</small></span>
+                <span><strong>Post-filter</strong><small>Slightly deeper suppression between harmonics</small></span>
                 <input type="checkbox" checked={postFilter} disabled={isRunning}
                   onChange={(event) => denoiseStore.getState().setPostFilter(event.target.checked)}
                   aria-label="Enable the post-filter" />
@@ -500,6 +506,7 @@ function DenoiseRow({
   const isActive = item.status === 'processing'
   const silent = isSilent(item)
   const details = item.metadata ? describeMetadata(item.kind, item.metadata) : []
+  const notes = describeRowNotes(item)
   // Cleaning reuses the queue's converting styles: same meaning, same treatment.
   const statusClass = isActive ? 'converting' : item.status
   const canStop = isActive || (batchRunning && item.status === 'queued')
@@ -523,15 +530,24 @@ function DenoiseRow({
       <div className="file-meta">
         <span>{formatBytes(item.size)}</span>
         {details.map((detail) => <span key={detail}><i /> {detail}</span>)}
-        {isActive && <><i /><span>{Math.round(item.progress)}%</span></>}
+        {isActive && <><i /><span>{describeProgress(item)}</span></>}
         {isActive && item.speed !== null && <><i /><span>{item.speed.toFixed(1)}× realtime</span></>}
       </div>
       {(isActive || item.status === 'completed') && (
-        <div className="progress-track" role="progressbar" aria-label={`${item.name} cleanup progress`}
-          aria-valuenow={Math.round(item.progress)} aria-valuemin={0} aria-valuemax={100}>
-          <span style={{ width: `${item.progress}%` }} />
-        </div>
+        item.progress === null
+          // No percentage exists for this file, so the bar reports activity and the
+          // clock beside it says how much audio has gone through.
+          ? <div className="progress-track indeterminate" role="progressbar"
+              aria-label={`${item.name} cleanup progress`} aria-valuemin={0} aria-valuemax={100}
+              aria-valuetext={`${describeProgress(item)}, of an unknown total length`}>
+              <span />
+            </div>
+          : <div className="progress-track" role="progressbar" aria-label={`${item.name} cleanup progress`}
+              aria-valuenow={Math.round(item.progress)} aria-valuemin={0} aria-valuemax={100}>
+              <span style={{ width: `${item.progress}%` }} />
+            </div>
       )}
+      {notes.map((note) => <p className="file-note" key={note}>{note}</p>)}
       {silent && <p className="file-error">This file has no audio track to clean up.</p>}
       {item.error && <p className="file-error">{item.error}</p>}
     </div>
@@ -565,6 +581,88 @@ function isRetryable(item: DenoiseItem): boolean {
   return RETRYABLE.includes(item.status)
 }
 
+/**
+ * How far along a running file is. A file whose duration was never probed has no
+ * percentage to quote, so the clock stands in — the honest measure rather than a
+ * 0% that never moves.
+ */
+function describeProgress(item: DenoiseItem): string {
+  if (item.progress !== null) return `${Math.round(item.progress)}%`
+  return item.processedSeconds === undefined ? 'Working…' : `${formatClock(item.processedSeconds)} processed`
+}
+
+/**
+ * What this file's cleanup will do that the row does not otherwise show: channels
+ * mixed down, a container it cannot keep, streams the target cannot hold. Said
+ * before the job runs rather than left to be found in the output afterwards.
+ */
+function describeRowNotes(item: DenoiseItem): string[] {
+  const notes: string[] = []
+  const channels = item.metadata?.audioChannels
+
+  if (channels !== undefined && channels > DENOISE_MAX_CHANNELS) {
+    notes.push(`${channels} channels are mixed down to stereo before cleaning.`)
+  }
+  if (item.kind !== 'video') return notes
+
+  const extension = extensionOf(item.path || item.name)
+  const container = videoContainerForExtension(extension)
+  if (!container) return notes
+  const target = container.extension.toUpperCase()
+
+  if (container.extension !== extension) {
+    notes.push(`${extension.toUpperCase()} cannot hold the cleaned soundtrack, so this is written as ${target}.`)
+  }
+  // Only a container that cannot take everything leaves anything behind, and only a
+  // probed file is known to have extras in the first place.
+  if (!container.carriesAnything && item.metadata) {
+    const subtitles = item.metadata.subtitleTracks ?? 0
+    const otherAudio = Math.max(0, (item.metadata.audioTracks ?? 1) - 1)
+    const dropped = [
+      ...(subtitles ? [plural(subtitles, 'subtitle track')] : []),
+      ...(otherAudio ? [plural(otherAudio, 'other audio track')] : [])
+    ]
+    if (dropped.length) {
+      const one = subtitles + otherAudio === 1
+      notes.push(`${dropped.join(' and ')} ${one ? 'is' : 'are'} not carried into ${target}.`)
+    }
+  }
+
+  return notes
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+/**
+ * Scrolls a just-opened `<details>` into the settings column, which is the element
+ * that scrolls here. Without this, a group that sits at the bottom of that column
+ * unfolds entirely below the fold and looks like nothing happened. It bottom-aligns
+ * when the open group fits the visible area and top-aligns when it does not, so the
+ * summary is never the thing scrolled off. Smooth unless the OS asks otherwise —
+ * an explicit `behavior` overrides the `scroll-behavior` this stylesheet resets.
+ */
+function revealDisclosure(details: HTMLDetailsElement): void {
+  if (!details.open) return
+  const scroller = details.closest('.settings-body')
+  // One frame later: the panel has to be laid out open before its height means anything.
+  requestAnimationFrame(() => {
+    if (!details.isConnected) return
+    const fits = !scroller || details.offsetHeight <= scroller.clientHeight
+    details.scrollIntoView({
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: fits ? 'end' : 'start'
+    })
+  })
+}
+
+/** The extension of a filename, lowercased and without its dot. */
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+}
+
 /** True once a probe has confirmed the file carries no audio the model could work on. */
 function isSilent(item: DenoiseItem): boolean {
   return item.metadata !== undefined && !item.metadata.audioCodec
@@ -581,7 +679,7 @@ function describe(error: unknown, fallback: string): string {
  */
 function describeLevel(mode: DenoiseLevelMode, speechGainDb: number): string {
   if (mode === 'as-recorded') {
-    return 'No level change at all: the file is written exactly as the model produced it.'
+    return 'No level filter runs at all, so the encoder is handed the model’s own samples.'
   }
   if (mode === 'lift-speech') {
     return `Quiet speech is raised by up to ${speechGainDb} dB toward the peaks, without pushing them into clipping.`
@@ -594,11 +692,20 @@ function describeLevel(mode: DenoiseLevelMode, speechGainDb: number): string {
  * The one-line caption above a preview. It names the settings the clips were
  * rendered with, because the sliders can move afterwards and a stale preview
  * that looks current is worse than no preview at all.
+ *
+ * Loudness normalizing is the one setting the excerpt does not carry: `loudnorm`
+ * sets *integrated* loudness, so applied to eight seconds it would land those eight
+ * seconds on the target rather than showing where the whole file lands — and it
+ * would make the cleaned half the louder of the two, which is exactly the bias an
+ * A/B comparison has to avoid. The caption says so instead of quoting a figure the
+ * clips do not have.
  */
 function describeSettings(options: DenoiseOptions): string {
   const parts = [`First ${PREVIEW_SECONDS} seconds`]
   parts.push(options.attenuationLimitDb === 0 ? 'noise reduction off' : `${options.attenuationLimitDb} dB reduction`)
   if (options.speechGainDb > 0) parts.push(`+${options.speechGainDb} dB speech`)
-  if (options.normalizeLoudness) parts.push(`${DENOISE_LOUDNESS_TARGET_LUFS} LUFS`)
-  return parts.join(' · ')
+  const caption = parts.join(' · ')
+  return options.normalizeLoudness
+    ? `${caption} — the ${DENOISE_LOUDNESS_TARGET_LUFS} LUFS target applies to the finished file, not to this excerpt`
+    : caption
 }

@@ -15,8 +15,11 @@
  *
  * Note there is no counterpart to `df_create`: the exported
  * `__wbg_dfstate_free` cannot free a pointer that `df_create` handed out
- * through `Box::into_raw` (wasm-bindgen's aliasing guard rejects it), so model
- * states are created once and reused. See `engine.ts`.
+ * through `Box::into_raw` (wasm-bindgen's aliasing guard rejects it), so a
+ * model state cannot be released, and `initAsync` returns the module instance
+ * this thread already holds rather than a second one. Ending the thread is
+ * therefore the only way to reclaim either, which is what the denoiser does
+ * after every request. See `engine.ts`.
  */
 
 let wasm;

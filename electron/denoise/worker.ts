@@ -1,17 +1,24 @@
 /**
- * The denoise worker. One of these is started when the app becomes ready and
- * lives for the process: the model costs ~28 MB of wasm heap to load and has no
- * usable destructor (see `engine.ts`), so it is created once and reused.
+ * The denoise worker. One of these serves exactly one request — one file, or one
+ * A/B preview — and is then terminated by the service that started it.
  *
- * Jobs run one at a time. The heavy work is FFmpeg's and the model's, both of
- * which saturate a core on their own, and running two at once would only make
- * each slower while multiplying the wasm heap.
+ * That is not tidiness. The model states carry recurrent history and cannot be
+ * cleared (see `engine.ts` for the measurement), so reusing a thread would render
+ * the second file in a queue differently from the way a fresh run renders it. A
+ * fresh thread is the only way to get a fresh wasm instance: the vendored glue
+ * holds a single module-level instance, and `initAsync` returns the existing one
+ * on a second call.
+ *
+ * The model is loaded as soon as the thread starts rather than when the request
+ * arrives, so the service can keep one loaded worker standing by and the wait is
+ * spent while the previous file is still being processed.
  */
 import { readFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parentPort, workerData } from 'node:worker_threads'
 import type { MessagePort } from 'node:worker_threads'
+import { messageOf } from '../utils/guards'
 import { loadAssets } from './assets'
 import { buildPreviewExtractArgs } from './command-builder'
 import { DeepFilterBank } from './engine'
@@ -34,10 +41,10 @@ function requirePort(): MessagePort {
 }
 
 /**
- * Loading starts immediately rather than on the first job, so the model is warm
- * by the time anyone asks. A failure here is reported once and then re-thrown to
- * every job that arrives, which is what makes the feature degrade to "disabled"
- * rather than break the app.
+ * Loading starts immediately rather than when the request arrives, so the model is
+ * warm by the time the service hands this thread its work. A failure here is
+ * reported once, and re-thrown to the request if one arrives anyway, which is what
+ * makes the feature degrade to "disabled" rather than break the app.
  */
 const ready = (async (): Promise<DeepFilterBank> => {
   const assets = await loadAssets(settings.assetDirectory)
@@ -46,56 +53,47 @@ const ready = (async (): Promise<DeepFilterBank> => {
 
 void ready.then(
   (bank) => post({ type: 'ready', frameLength: bank.frameLength }),
-  (cause) => post({ type: 'unavailable', reason: describe(cause) })
+  (cause) => post({ type: 'unavailable', reason: messageOf(cause) })
 )
 
-const queue: Array<DenoiseJobMessage | DenoisePreviewMessage> = []
 let controller: AbortController | null = null
-let activeId: string | null = null
-let draining = false
+let servingId: string | null = null
+/** A cancel that arrived before the request it names, which the service can send. */
+let cancelledEarly: string | null = null
 
 port.on('message', (message: DenoiseWorkerRequest) => {
   if (message.type === 'cancel') {
     cancel(message.id)
     return
   }
-  queue.push(message)
-  void drain()
+  void handle(message)
 })
 
-/** Aborts the running job, or drops a queued one that never started. */
+/** Aborts the request this thread is serving, or remembers a cancel that beat it. */
 function cancel(id: string): void {
-  if (id === activeId) {
+  if (id === servingId) {
     controller?.abort()
     return
   }
-  const index = queue.findIndex((message) => message.request.id === id)
-  if (index < 0) return
-  queue.splice(index, 1)
-  post({ type: 'cancelled', id })
-}
-
-async function drain(): Promise<void> {
-  if (draining) return
-  draining = true
-  try {
-    let message = queue.shift()
-    while (message) {
-      await handle(message)
-      message = queue.shift()
-    }
-  } finally {
-    draining = false
-  }
+  cancelledEarly = id
 }
 
 async function handle(message: DenoiseJobMessage | DenoisePreviewMessage): Promise<void> {
   const { id } = message.request
+  if (servingId !== null) {
+    // The service starts a thread per request; a second one here would run on a
+    // used model state, which is the thing this design exists to prevent.
+    post({ type: 'failed', id, message: 'This denoise worker has already served a request' })
+    return
+  }
+  servingId = id
+
   const abortController = new AbortController()
   controller = abortController
-  activeId = id
+  if (cancelledEarly === id) abortController.abort()
 
   try {
+    if (abortController.signal.aborted) throw new DenoiseCancelledError(id)
     const bank = await ready
     bank.prepare(message.channels, message.request.options)
     if (message.type === 'job') await runJob(bank, message, abortController.signal)
@@ -105,11 +103,10 @@ async function handle(message: DenoiseJobMessage | DenoisePreviewMessage): Promi
     if (abortController.signal.aborted || cause instanceof DenoiseCancelledError) {
       post({ type: 'cancelled', id })
     } else {
-      post({ type: 'failed', id, message: describe(cause) })
+      post({ type: 'failed', id, message: messageOf(cause) })
     }
   } finally {
     controller = null
-    activeId = null
   }
 }
 
@@ -136,9 +133,15 @@ async function runJob(bank: DeepFilterBank, message: DenoiseJobMessage, signal: 
 
 /**
  * Renders the same window twice — once straight from the source, once through the
- * model and the level stage — as short WAVs the renderer decodes for its A/B
- * player. The cleaned half deliberately carries the level settings too: a preview
- * that skipped them would not be the file the person is about to write.
+ * model — as short WAVs the renderer decodes for its A/B player.
+ *
+ * The cleaned half carries the speech lift, which is a within-file correction and so
+ * means the same thing on an excerpt as on the whole recording. It deliberately does
+ * *not* carry loudness normalizing: `loudnorm` sets integrated loudness, so on eight
+ * seconds it would land those eight seconds on the target rather than showing where
+ * the finished file lands — and it would leave the cleaned half the louder of the two,
+ * which decides an A/B comparison before anyone has listened to it. The caption in the
+ * panel says as much rather than letting the clips imply otherwise.
  *
  * Both are handed over as transferred ArrayBuffers so the bytes are moved rather
  * than copied, and the scratch directory never outlives the request.
@@ -176,7 +179,7 @@ async function runPreview(
       limitSeconds: request.durationSeconds,
       totalSeconds: request.durationSeconds,
       speechGainDb: request.options.speechGainDb,
-      normalizeLoudness: request.options.normalizeLoudness,
+      normalizeLoudness: false,
       signal
     })
 
@@ -198,9 +201,4 @@ async function readBytes(path: string): Promise<ArrayBuffer> {
 
 function post(event: DenoiseWorkerEvent): void {
   port.postMessage(event)
-}
-
-function describe(cause: unknown): string {
-  if (cause instanceof Error) return cause.message
-  return String(cause)
 }

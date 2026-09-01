@@ -11,9 +11,11 @@ import {
 import { temporaryOutputPath } from '../ffmpeg/converter'
 import { mapFFmpegError } from '../ffmpeg/errors'
 import type { Spawn } from '../ffmpeg/probe'
+import { toError } from '../utils/guards'
 import { buildDecodeArgs, buildEncodeArgs } from './command-builder'
 import { DenoiseCancelledError } from './errors'
-import { PRE_GAIN_SILENCE_PEAK, clampGainForPeak, peakOf, preGainFor } from './pre-gain'
+import { PRE_GAIN_SILENCE_PEAK, createGainStager, peakOf } from './pre-gain'
+import type { StagedGain } from './pre-gain'
 import type { DeepFilterBank } from './engine'
 
 const BYTES_PER_SAMPLE = 4
@@ -159,13 +161,17 @@ interface PumpOptions {
  *
  * - the first second is held back to choose a pre-gain, so the model is handed a
  *   healthy level even when the recording was made at a quiet one (see
- *   `pre-gain.ts`), and the same factor is divided back out of its output. The
- *   lift is then held down as the file goes by, so a recording that opens on room
- *   tone and later gets loud does not arrive at the model over-driven;
+ *   `pre-gain.ts`), and each frame's output is divided by the lift that frame went
+ *   in at. The lift is then held down as the file goes by, so a recording that opens
+ *   on room tone and later gets loud does not arrive at the model over-driven;
  * - the model's output lags its input by `bank.delayFrames`, so that much is
  *   dropped from the front and the same amount is flushed out at the end. Without
  *   it a file loses the tail of its last word and a video's cleaned soundtrack
  *   runs 30 ms behind the picture.
+ *
+ * The two corrections are the same correction seen from both ends: because the model
+ * answers late, the lift to undo is the one from `delayFrames` ago rather than the
+ * one now in force, which is what `createGainStager` keeps track of.
  *
  * What reaches the encoder is therefore exactly as many samples as came in, at the
  * level they came in at.
@@ -178,10 +184,8 @@ function pump(options: PumpOptions): Promise<void> {
   const startedAt = Date.now()
 
   let carry: Buffer = EMPTY
-  let gain = 1
+  const stager = createGainStager(bank.delayFrames)
   let calibrated = false
-  /** Loudest sample handed to the model so far, which the gain is kept under. */
-  let loudest = 0
   /** Model output still to be discarded to undo the lookahead, in samples. */
   let skipSamples = bank.delayFrames * frameSamples
   /** Bytes read from the decoder, which decide how many samples are written back. */
@@ -192,6 +196,8 @@ function pump(options: PumpOptions): Promise<void> {
   let processedSamples = 0
   let reportedAt = 0
   let settled = false
+  /** True once the decoder has handed over everything, so its close is expected. */
+  let ended = false
 
   return new Promise<void>((resolve, reject) => {
     const settle = (error?: Error): void => {
@@ -251,19 +257,9 @@ function pump(options: PumpOptions): Promise<void> {
       if (!atEnd && perChannel < CALIBRATION_SAMPLES) return false
       const peak = peakOf(carry)
       if (!atEnd && peak <= PRE_GAIN_SILENCE_PEAK && perChannel < MAX_CALIBRATION_SAMPLES) return false
-      gain = preGainFor(peak)
+      stager.calibrate(peak)
       calibrated = true
       return true
-    }
-
-    /**
-     * The lift to use for a block: the calibrated one, held down so that audio
-     * louder than the window it was chosen from does not arrive at the model past
-     * `PRE_GAIN_MODEL_CEILING`. The running peak only grows, so the gain only falls.
-     */
-    const stagedGain = (block: Buffer): number => {
-      loudest = Math.max(loudest, peakOf(block))
-      return clampGainForPeak(gain, loudest)
     }
 
     /** Denoises every whole frame waiting in `carry` and emits the result. */
@@ -272,8 +268,7 @@ function pump(options: PumpOptions): Promise<void> {
       if (frames === 0) return
       const block = carry.subarray(0, frames * frameBytes)
       carry = carry.subarray(frames * frameBytes)
-      gain = stagedGain(block)
-      emit(denoiseFrames(block, frames, frames * frameSamples, bank, channels, scratch, gain))
+      emit(denoiseFrames(block, frames, frames * frameSamples, bank, channels, scratch, stager.step))
       processedSamples += frames * bank.frameLength
     }
 
@@ -296,6 +291,7 @@ function pump(options: PumpOptions): Promise<void> {
 
     source.once('end', () => {
       if (settled) return
+      ended = true
       total = Math.floor(inputBytes / BYTES_PER_SAMPLE)
       try {
         if (!calibrated) calibrate(true)
@@ -305,15 +301,15 @@ function pump(options: PumpOptions): Promise<void> {
         if (remaining > 0) {
           const padded = Buffer.alloc(frameBytes)
           carry.copy(padded, 0, 0, remaining * BYTES_PER_SAMPLE)
-          gain = stagedGain(padded)
-          emit(denoiseFrames(padded, 1, remaining, bank, channels, scratch, gain))
+          emit(denoiseFrames(padded, 1, remaining, bank, channels, scratch, stager.step))
           processedSamples += Math.ceil(remaining / channels)
         }
 
-        // Silence in, so the frames still inside the model come out.
+        // Silence in, so the frames still inside the model come out. Each one is
+        // divided by the lift its audio went in at, which is still queued.
         const silence = Buffer.alloc(frameBytes)
         for (let frame = 0; frame < bank.delayFrames && writtenSamples < total; frame++) {
-          emit(denoiseFrames(silence, 1, 0, bank, channels, scratch, gain))
+          emit(denoiseFrames(silence, 1, 0, bank, channels, scratch, stager.step))
         }
       } catch (cause) {
         settle(toError(cause))
@@ -325,8 +321,12 @@ function pump(options: PumpOptions): Promise<void> {
     })
 
     source.once('error', (cause) => settle(toError(cause)))
-    // Reached only when the decoder dies mid-stream; its exit code carries the reason.
-    source.once('close', () => settle(new Error('The decoder stopped before the audio ended')))
+    // Reached only when the decoder dies mid-stream. A stream that ended normally
+    // closes afterwards too, so that case is ruled out explicitly rather than left
+    // to the order the two events happen to arrive in.
+    source.once('close', () => {
+      if (!ended) settle(new Error('The decoder stopped before the audio ended'))
+    })
     sink.once('error', (cause) => settle(toError(cause)))
   })
 }
@@ -336,12 +336,16 @@ function pump(options: PumpOptions): Promise<void> {
  * interleaved result. Samples at or past `availableSamples` are read as silence,
  * which is how the final partial frame gets padded.
  *
- * `gain` is applied on the way into the model and taken back out on the way out,
- * so it changes what the model sees and nothing about the level written.
+ * `stage` is called once per frame with that frame's own peak, before any lift, and
+ * answers with the pair of factors to use: `in` on the way into the model, `out` —
+ * the lift from `delayFrames` ago — on the way back out. Undoing the current lift
+ * instead would mis-scale the frames still in flight whenever it changes.
  *
  * Samples are read and written a float at a time rather than through a typed
  * array view: a Buffer that arrived from a pipe carries no alignment guarantee,
- * and `new Float32Array(buffer, byteOffset, …)` throws on an odd offset.
+ * and `new Float32Array(buffer, byteOffset, …)` throws on an odd offset. The lift
+ * itself is applied over the typed scratch array, so it costs one pass over a frame
+ * and saves the separate pass a per-block peak used to make.
  */
 function denoiseFrames(
   input: Buffer,
@@ -350,19 +354,33 @@ function denoiseFrames(
   bank: DeepFilterBank,
   channels: number,
   scratch: Float32Array[],
-  gain: number
+  stage: (framePeak: number) => StagedGain
 ): Buffer {
   const { frameLength } = bank
   const output = Buffer.allocUnsafe(frameCount * frameLength * channels * BYTES_PER_SAMPLE)
 
   for (let frame = 0; frame < frameCount; frame++) {
     const base = frame * frameLength * channels
+    let framePeak = 0
 
     for (let sample = 0; sample < frameLength; sample++) {
       for (let channel = 0; channel < channels; channel++) {
         const position = base + sample * channels + channel
         const target = scratch[channel] as Float32Array
-        target[sample] = position < availableSamples ? input.readFloatLE(position * BYTES_PER_SAMPLE) * gain : 0
+        const value = position < availableSamples ? input.readFloatLE(position * BYTES_PER_SAMPLE) : 0
+        target[sample] = value
+        const magnitude = Math.abs(value)
+        // A NaN or an infinity would otherwise decide the lift for the whole file.
+        if (Number.isFinite(magnitude) && magnitude > framePeak) framePeak = magnitude
+      }
+    }
+
+    const { in: gainIn, out: gainOut } = stage(framePeak)
+    if (gainIn !== 1) {
+      for (const channel of scratch) {
+        for (let sample = 0; sample < frameLength; sample++) {
+          channel[sample] = (channel[sample] as number) * gainIn
+        }
       }
     }
 
@@ -370,7 +388,7 @@ function denoiseFrames(
       const denoised = bank.processFrame(channel, scratch[channel] as Float32Array)
       for (let sample = 0; sample < frameLength; sample++) {
         const position = base + sample * channels + channel
-        output.writeFloatLE((denoised[sample] as number) / gain, position * BYTES_PER_SAMPLE)
+        output.writeFloatLE((denoised[sample] as number) / gainOut, position * BYTES_PER_SAMPLE)
       }
     }
   }
@@ -407,11 +425,12 @@ function waitForExit(child: ChildProcess, readErrors: () => string): Promise<voi
   })
 }
 
-function percentOf(processedSeconds: number, totalSeconds: number | undefined): number {
-  if (!totalSeconds || !Number.isFinite(totalSeconds) || totalSeconds <= 0) return 0
+/**
+ * Progress through the file, or null when the duration is unknown — in which case
+ * there is no percentage to be had and the UI says so rather than showing a 0 that
+ * never moves.
+ */
+function percentOf(processedSeconds: number, totalSeconds: number | undefined): number | null {
+  if (!totalSeconds || !Number.isFinite(totalSeconds) || totalSeconds <= 0) return null
   return Math.min(100, Math.max(0, (processedSeconds / totalSeconds) * 100))
-}
-
-function toError(cause: unknown): Error {
-  return cause instanceof Error ? cause : new Error(String(cause))
 }

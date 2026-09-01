@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Downloads the DeepFilterNet3 runtime assets that Hope Converter's denoiser
- * needs, and refuses anything whose SHA-256 does not match the pinned digest
- * below. Run once per checkout:
+ * needs, and refuses anything whose SHA-256 does not match the digest pinned in
+ * `electron/denoise/asset-manifest.json`. Run once per checkout:
  *
  *     npm run fetch:models
  *
@@ -18,32 +18,19 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const targetDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', 'resources', 'deepfilternet3')
+const scriptDirectory = dirname(fileURLToPath(import.meta.url))
+const targetDirectory = join(scriptDirectory, '..', 'resources', 'deepfilternet3')
+const manifestPath = join(scriptDirectory, '..', 'electron', 'denoise', 'asset-manifest.json')
 
 /**
- * The ONNX model comes straight from the upstream DeepFilterNet repository at a
- * pinned tag. The WebAssembly build is compiled from that same project's
- * `libDF --features wasm` target, but upstream publishes no prebuilt `.wasm`,
- * so it is mirrored from the CDN that the `deepfilternet3-noise-filter` and
- * `deepfilter-standalone` packages use. The digest is what makes that safe:
- * a substituted or corrupted binary fails the check and nothing is written.
+ * What to download, where from, and what it must hash to.
+ *
+ * The table is read rather than declared here: `electron/denoise/assets.ts`
+ * imports the same file, so the digests this script downloads against and the
+ * digests the app re-checks at load time cannot drift apart. See the manifest's
+ * own `$comment` for where each asset comes from.
  */
-const ASSETS = [
-  {
-    name: 'df_bg.wasm',
-    url: 'https://cdn.laptrinhai.id.vn/deepfilternet3/pkg/df_bg.wasm',
-    bytes: 9_235_331,
-    sha256: '6ea100532996aa0a07405fa2265e27337c351fe1cbdf63ac65886373484089c7',
-    note: 'DeepFilterNet libDF compiled to WebAssembly (wasm-bindgen 0.2.87)'
-  },
-  {
-    name: 'DeepFilterNet3_onnx.tar.gz',
-    url: 'https://raw.githubusercontent.com/Rikorose/DeepFilterNet/v0.5.6/models/DeepFilterNet3_onnx.tar.gz',
-    bytes: 7_983_136,
-    sha256: 'c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616',
-    note: 'DeepFilterNet3 ONNX weights, upstream tag v0.5.6'
-  }
-]
+const ASSETS = JSON.parse(await readFile(manifestPath, 'utf8')).assets
 
 async function digestOf(path) {
   return createHash('sha256').update(await readFile(path)).digest('hex')

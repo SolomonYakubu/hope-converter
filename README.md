@@ -22,10 +22,10 @@ The application is functional end to end:
 - Codec-specific tuning for VideoToolbox, NVENC, QSV, VP9, x264, and x265
 - Single-viewport layout: the page never scrolls, only the file list and settings body do
 - Two workspaces in one window, **Convert** and **Clean audio**, sharing the output folder and the file picker
-- Light and dark themes with a custom violet design system
-- About dialog carrying the FFmpeg version and the story behind the name
+- Light and dark themes, and six accents — violet, neon green, lime, orange, cyan and rose — chosen under Appearance in the settings dialog and remembered between launches. Each accent is the violet palette turned to a new hue by `npm run accents`, which re-solves every colour that carries text until it reaches the contrast the violet does, so the small labels stay as legible on all six. The app mark is turned with it by `npm run logos`, per pixel and in the same colour space, so its bevels and gloss survive the change of hue instead of being flattened to a tint
+- One settings dialog behind the gear in the header, holding Appearance and the About panel: the FFmpeg version and the story behind the name
 - Secure, allowlisted IPC bridge
-- Unit tests for command generation, parsing, file handling, conversion lifecycle, hardware detection, settings persistence, queue state, and the denoiser's command builder, asset resolution, queue service and store, level staging, pre-gain, and streaming pump, plus a separate integration suite that drives the real FFmpeg binary and the real model — including a re-measurement of the model's lookahead delay and of what its attenuation limit means, so a model that differs on either fails the build rather than quietly desyncing video or making the panel's percentages fiction
+- Unit tests for command generation, parsing, file handling, conversion lifecycle, hardware detection, settings persistence, queue state, and the denoiser's command builder, asset digest verification, queue service and store, level staging, pre-gain, and streaming pump, plus a separate integration suite that drives the real FFmpeg binary and the real model — including a re-measurement of the model's lookahead delay and of what its attenuation limit means, proof that a fresh model state renders a file identically twice while a used one does not, and a multi-stream remux that must come out with its extra tracks and chapters intact, so a model or a container change that differs on any of it fails the build rather than quietly desyncing video, dropping tracks, rendering the second file in a queue differently from the first, or making the panel's percentages fiction
 
 Roadmap work still open: queue reordering, per-codec advanced options, named presets, output naming rules, keyboard shortcuts, metadata preservation, logging, auto-update, signing/notarization, and real-time microphone denoising.
 
@@ -101,13 +101,13 @@ Code signing and macOS notarization credentials are required for trusted public 
 - `electron/main.ts` owns windows, native dialogs, IPC validation, and OS integration.
 - `electron/preload.ts` exposes a narrow typed API; the renderer never receives Node or raw Electron APIs.
 - `electron/ffmpeg/` contains pure command generation, progress parsing, probing, hardware detection, and process lifecycle management.
-- `electron/denoise/` holds the DeepFilterNet3 denoiser: asset resolution, the wasm engine wrapper, the FFmpeg-piping pipeline, and a worker thread that owns them. The main process only queues requests and relays events.
+- `electron/denoise/` holds the DeepFilterNet3 denoiser: asset resolution, the wasm engine wrapper, the FFmpeg-piping pipeline, and the worker threads that own them. The main process holds the queue and relays events; a worker owns one request.
 - `src/` contains the sandboxed React renderer, Zustand queue state, and persisted renderer settings.
 - `tests/unit/` contains fast unit tests for the engine and renderer state; `tests/integration/` exercises the real bundled binaries.
 
 FFmpeg is spawned directly with an argument array and `shell: false`. Conversion options are represented as discriminated TypeScript types and checked against codec and numeric allowlists before process creation.
 
-The denoiser runs in a `worker_threads` worker so the wasm model never blocks the main process or the UI. The model is loaded once at startup and reused: `df_create` hands out a pointer that wasm-bindgen cannot free, and each state costs tens of megabytes of wasm heap, so states are flushed with silence between jobs instead of being recreated. Audio streams through in frames of 480 samples, so a two-hour file costs the same memory as a ten-second one, and output goes to a `.part` sibling that is only renamed into place once both FFmpeg processes have exited cleanly.
+The denoiser runs in `worker_threads` workers so the wasm model never blocks the main process or the UI. Each request — a file or an A/B preview — gets a thread of its own, which is terminated once the request settles. That is not tidiness: a model state carries recurrent history that nothing can clear (`df_create` hands out a pointer wasm-bindgen cannot free, and the wasm glue keeps one module instance per thread), so a second file rendered on a used state comes out differently from the way a fresh run renders it — 20.6 dB quieter on the integration suite's fixture, where two fresh states agree bit for bit. To keep that from costing a model load per file, one loaded thread stands by and its replacement starts the moment it is claimed, so in a queue the next file's model load happens while the current file is being processed; at most two threads are alive at once, and the assets are verified once per app run rather than once per file. Audio streams through in frames of 480 samples, so a two-hour file costs the same memory as a ten-second one, and output goes to a `.part` sibling that is only renamed into place once both FFmpeg processes have exited cleanly.
 
 ## Supported MVP formats
 
@@ -119,7 +119,7 @@ The denoiser runs in a `worker_threads` worker so the wasm model never blocks th
 
 Actual decode/encode availability is determined by the bundled FFmpeg build and may vary by platform.
 
-Audio cleanup accepts any of those audio and video inputs and writes FLAC, WAV, MP3, or M4A for audio. A video keeps its own container, except AVI, FLV, and WMV, which are rebuilt as MKV — the picture is still copied untouched, just into a wrapper that takes the new soundtrack without complaint.
+Audio cleanup accepts any of those audio and video inputs and writes FLAC (24-bit), WAV (24-bit PCM), MP3, or M4A for audio. A video keeps its own container, except AVI, FLV, and WMV, which are rebuilt as MKV — the picture is still copied untouched, just into a wrapper that takes the new soundtrack without complaint. What else survives the remux depends on the container: see [Using it](#using-it).
 
 ## Audio cleanup
 
@@ -140,24 +140,26 @@ npm run fetch:models
 1. Open the **Clean audio** tab.
 2. Drop in audio or video files, or press **Browse**. Files without an audio track are labelled and skipped.
 3. Set **Noise reduction** — the choices are Gentle (6), Balanced (12, the default), Strong (18), and Maximum (24). The number is the model's attenuation limit in dB, which is the same number as the share of the original recording kept underneath the result: 6 dB keeps half of it, 12 dB a quarter, 24 dB a sixteenth. That kept share is what protects speech the model misread as noise, so the panel names it under the buttons — see [Getting the most speech through](#getting-the-most-speech-through).
-4. Pick an **Output level**: *As recorded*, *Lift quiet voice*, or *Even loudness* (−16 LUFS). Both are FFmpeg stages that run after the model — see [The level controls](#the-level-controls).
+4. Pick an **Output level**: *As recorded*, *Lift quiet voice*, or *Even loudness* (−16 LUFS). The last two are FFmpeg stages that run after the model — see [The level controls](#the-level-controls).
 5. Everything in dB lives under **Fine controls** at the bottom of the panel, closed by default: the reduction slider (0–24, so 0 passes the audio through untouched), the speech lift in dB (0–18), and the post-filter.
-6. Press the headphones button on a row to hear the first 8 seconds before and after, in the A/B player: one waveform per version, click or drag anywhere on it to seek, space to play, **A**/**B** to switch sides mid-sentence, and a level-match toggle so the louder version does not simply win. The caption names the settings the clips were rendered with, so a preview left behind by moved sliders is obvious.
+6. Press the headphones button on a row to hear the first 8 seconds before and after, in the A/B player: one waveform per version, click or drag anywhere on it to seek, space to play, **A**/**B** to switch sides mid-sentence, and a level-match toggle so the louder version does not simply win. The caption names the settings the clips were rendered with, so a preview left behind by moved sliders is obvious. The cleaned half carries the noise reduction and the speech lift, but never **Even loudness**: that target is set over a whole file, so applying it to an 8-second excerpt would land the excerpt somewhere the finished file will not, and make the louder clip win the comparison the player exists to make.
 7. Choose where cleaned files go, then press **Clean**.
 
 If a result is not right, change the settings and press the retry button on that row. It cleans that one file again and replaces the copy already written rather than piling up numbered variants.
 
-Each result is written beside the original name with `-denoised` added — `interview.mov` becomes `interview-denoised.mp4`. Audio files are written in the format chosen under **Output** (FLAC by default, or WAV, MP3, M4A). A video keeps its own container and **its picture is copied, never re-encoded** — only the soundtrack is rebuilt, so there is no generation loss in the video.
+Each result is written beside the original name with `-denoised` added — `interview.mov` becomes `interview-denoised.mp4`. Audio files are written in the format chosen under **Output**: FLAC by default (24-bit), or 24-bit PCM WAV, MP3, or M4A. Every path decodes to 48 kHz float and re-encodes, so a cleaned file is a new encode rather than an edit of the original — for a video that means the soundtrack is re-encoded (AAC, or Opus for WebM) while **the picture is copied, never re-encoded**, so there is no generation loss in the video.
 
-Files are processed one at a time; the rest of the queue waits at "Ready". Progress and speed are reported per file, a running file can be stopped, and switching back to **Convert** does not interrupt anything.
+What else the remux keeps depends on what the container can legally hold. Every video stream, the chapters, and the file-level metadata are carried in all cases. Matroska targets (`.mkv`, and the AVI/FLV/WMV inputs rebuilt as MKV) also keep the other audio tracks, the subtitles, and any attachments, copied rather than re-encoded. MP4, M4V, MOV, and WebM cannot legally carry an arbitrary subtitle or audio codec — image-based subtitles have no MP4 representation, AC-3 is not valid in WebM — so those tracks are dropped rather than failing the whole job, and the panel says on the row exactly how many are being left behind before you press **Clean**.
+
+Files are processed one at a time; the rest of the queue waits at "Ready". Each file is cleaned on a model state that has processed nothing else, so the fifth file in a queue comes out exactly as it would have on its own, and a retry re-renders a row exactly as a first attempt would — the thread carrying the model is replaced between files, and the next one is loaded while the current file is still running, so that costs no waiting. Progress and speed are reported per file, a running file can be stopped, and switching back to **Convert** does not interrupt anything. A file whose duration FFprobe could not read shows a moving bar and an elapsed-audio clock instead of a percentage, since there is nothing to be a percentage of.
 
 ### The level controls
 
 The model has no volume control of its own — it takes noisy audio and returns clean audio at the level it arrived. Loudness is therefore a separate FFmpeg stage that runs after the denoising, and it comes in two kinds, which is why **Output level** offers three answers rather than two:
 
 - **Noise reduction** is the model. It decides how much of what it hears is not speech.
-- **Lift quiet voice** raises quiet speech toward the peak afterwards (`speechnorm`), by the dB shown under **Fine controls**. At 0 no filter is applied at all, so the output is byte for byte what the model produced. It evens out one file; it does not know what any other file sounds like.
-- **Even loudness** sets the absolute integrated loudness to −16 LUFS (`loudnorm`), which is what makes recordings from different sessions sit at the same level next to each other. If a lift is also set, both run — the lift shapes what reaches the target, and the target has the last word on how loud the file lands.
+- **Lift quiet voice** raises quiet speech toward the peak afterwards (`speechnorm`), by the dB shown under **Fine controls**. At 0, with **Even loudness** off, no `-af` reaches FFmpeg at all, so the samples handed to the encoder are the model's own — the file is still an encode in the chosen format, but nothing has touched its levels. It evens out one file; it does not know what any other file sounds like.
+- **Even loudness** sets the absolute integrated loudness to −16 LUFS (`loudnorm`), which is what makes recordings from different sessions sit at the same level next to each other. If a lift is also set, both run — the lift shapes what reaches the target, and the target has the last word on how loud the file lands. Because the target is integrated over the whole file, it is the one setting the 8-second A/B preview cannot honestly show.
 
 **Noise reduction is a dry/wet mix rather than a threshold**, which is a measured claim rather than an analogy. DeepFilterNet3's attenuation limit emits `alpha * original + (1 - alpha) * enhanced` with `alpha = 10 ** (-dB / 20)`; fitting that single parameter against the bundled model reproduces its output to five decimals at every limit from 3 to 100 dB, with and without the post-filter, on noise and on voice alike. The dB number and the percentage the panel quotes are therefore one setting read from either end, and `tests/integration/real-denoise.test.ts` pins it so a model that means something else by its limit fails the build. What this model cannot do is give genuinely independent speech and background levels, since it returns one enhanced signal rather than separate stems.
 
@@ -166,7 +168,9 @@ The model has no volume control of its own — it takes noisy audio and returns 
 Two corrections happen automatically, both worth knowing about because they were the cause of speech sounding clipped in earlier builds:
 
 - **Alignment.** The model looks ahead before it decides, so its output lags its input by exactly three frames — 30 ms, measured by cross-correlation against the bundled model. The pipeline drops that much from the front and flushes the same amount back out at the end, so a cleaned file is exactly as long as the original, keeps the tail of its last word, and a video's soundtrack stays in sync with its picture.
-- **Input level.** The model is not level invariant, and quietly recorded audio was where the worst damage came from. Handed a file peaking 35 dB below full scale, the model stopped telling speech from noise and simply attenuated *everything* by the limit — at 30 dB reduction the loudest speech frames came back 29.9 dB down, which is the whole voice turned off. Lifted into a healthy range first, the same frames come back 0.3 dB down. So the first second of audio is measured, a pre-gain is applied on the way into the model, and the same factor is divided back out of its output: the model sees a level it behaves at, and the written file keeps the level it always had. The lift is also held under +6 dBFS as the file goes by, so a recording that opens on room tone and later gets loud is not over-driven instead — past about +12 dBFS the model starts gating loud speech (−11.7 dB at +20).
+- **Input level.** The model is not level invariant, and quietly recorded audio was where the worst damage came from. Handed a file peaking 35 dB below full scale, the model stopped telling speech from noise and simply attenuated *everything* by the limit — at 30 dB reduction the loudest speech frames came back 29.9 dB down, which is the whole voice turned off. Lifted into a healthy range first, the same frames come back 0.3 dB down. So the first second of audio is measured, a pre-gain is applied on the way into the model, and each frame coming back is divided by **the lift that frame went in at** rather than whatever is in force three frames later: the model sees a level it behaves at, and the written file keeps the level it always had, sample for sample, not merely at its peak. The lift is also held under +6 dBFS as the file goes by, so a recording that opens on room tone and later gets loud is not over-driven instead — past about +12 dBFS the model starts gating loud speech (−11.7 dB at +20).
+
+  The lift is chosen once, from roughly the first second, and can afterwards only fall. That is a real limitation and not a hidden one: a recording that starts loud and later drops to a whisper gets no lift on the whisper. Fixing it properly means an envelope-following gain, which changes what the model hears everywhere and needs listening tests rather than a unit test, so it is a separate proposal rather than a quiet change here.
 
 **The reduction setting is the other half of this.** Whatever the model does not hold as speech survives only in the share of the original the limit keeps, and the quiet end of a word is exactly what it is least sure about. Measured against the bundled model on speech at a 10 dB SNR, with the pre-gain doing its job, here is what each setting did to speech frames grouped by how loud they are relative to the loudest speech:
 
@@ -195,7 +199,9 @@ Other limits worth knowing:
 
 ### Where the assets come from
 
-`npm run fetch:models` downloads two files into `resources/deepfilternet3/` and verifies each against a SHA-256 digest pinned in [`scripts/fetch-denoise-assets.mjs`](./scripts/fetch-denoise-assets.mjs). A file whose digest does not match is discarded and the script fails, so a substituted or truncated download can never be loaded.
+`npm run fetch:models` downloads two files into `resources/deepfilternet3/` and verifies each against a SHA-256 digest pinned in [`electron/denoise/asset-manifest.json`](./electron/denoise/asset-manifest.json). A file whose digest does not match is discarded and the script fails.
+
+The app re-checks the same digests every time the denoiser starts. The manifest is imported by [`electron/denoise/assets.ts`](./electron/denoise/assets.ts), so the digests are compiled into the bundle rather than shipped as a swappable file beside the assets, and each file is hashed once per app run before anything is loaded. A file replaced or truncated *after* setup therefore fails closed — the tab reports the mismatch and stays disabled instead of loading it.
 
 | File | Source | Why |
 | --- | --- | --- |
@@ -214,7 +220,7 @@ Packaged builds ship both files through electron-builder's `extraResources`, bes
 - A restrictive Content Security Policy is applied.
 - IPC payloads and FFmpeg options are validated in the main process.
 - Processes are launched without a shell, so paths with spaces and shell metacharacters remain plain arguments.
-- The denoiser's model and WebAssembly are downloaded once at setup time and verified against pinned SHA-256 digests. The application itself makes no network requests at runtime — neither conversion nor audio cleanup reaches the network.
+- The denoiser's model and WebAssembly are downloaded once at setup time and verified against SHA-256 digests compiled into the app, which are re-checked at every load, so a file swapped after setup fails closed rather than running. The application itself makes no network requests at runtime — neither conversion nor audio cleanup reaches the network.
 
 ## Contributing
 

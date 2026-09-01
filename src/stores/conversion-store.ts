@@ -1,7 +1,7 @@
 import { createStore } from 'zustand/vanilla'
 import type { ConversionProgress, MediaKind, MediaMetadata } from '../../electron/types/conversion'
 import type { InputFile } from '../types/hope-converter'
-import { isFinishedStatus, NO_ADDITIONS, type AddFilesResult } from './queue-additions'
+import { createId, isFinishedStatus, NO_ADDITIONS, type AddFilesResult } from './queue-additions'
 import {
   getBrowserStorage,
   loadRendererSettings,
@@ -44,10 +44,6 @@ export interface ConversionState extends RendererSettings {
   clearFinished: () => void
 }
 
-function createId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `conversion-${Date.now()}-${Math.random().toString(36).slice(2)}`
-}
-
 function settingsFromState(state: ConversionState): RendererSettings {
   return {
     quality: state.quality,
@@ -85,7 +81,7 @@ export function createConversionStore(storage: StorageLike | null = getBrowserSt
             if (!file.path) continue
             const match = existing.get(file.path)
             if (!match) {
-              const item: QueueItem = { ...file, id: createId(), status: 'queued', progress: 0 }
+              const item: QueueItem = { ...file, id: createId('conversion'), status: 'queued', progress: 0 }
               existing.set(item.path, item)
               additions.push(item)
             } else if (isFinishedStatus(match.status)) revive.add(match.id)

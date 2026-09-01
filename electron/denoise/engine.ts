@@ -7,9 +7,7 @@ import {
   initAsync
 } from './vendor/df-bindings.js'
 import { DENOISE_MAX_CHANNELS, DENOISE_MAX_SPEECH_GAIN_DB, type DenoiseOptions } from '../types/denoise'
-
-/** Frames of silence pushed through a state to clear it between jobs. */
-const FLUSH_FRAMES = 8
+import { clamp } from '../utils/guards'
 
 /**
  * Frames the model's output lags its input by.
@@ -44,12 +42,20 @@ export function clampOptions(options: DenoiseOptions): DenoiseOptions {
 /**
  * One DeepFilterNet3 state per channel, wrapped so callers work in frames.
  *
- * The states are created once and live for the process. wasm-bindgen exports no
- * usable destructor for them (see `vendor/df-bindings.js`), and each costs
- * roughly 28 MB of wasm heap for the first and 11 MB for each after, so
- * creating one per job would leak steadily. Instead `reset()` flushes a state
- * with silence between jobs, which is enough: the model emits exact zeros for a
- * silent input, leaving no audible history behind.
+ * A bank serves exactly one job, and `prepare()` refuses a second. The states
+ * carry recurrent history that nothing here can clear: wasm-bindgen exports no
+ * usable destructor (see `vendor/df-bindings.js`), and pushing silence through a
+ * used state does not put it back where a fresh one starts. This class used to
+ * flush 80 ms of silence between jobs and call that enough; measured against a
+ * genuinely fresh state on the same input, the second job then came out 10.9 dB
+ * different, with its speech 2.4 dB quieter, and no flush length tried between
+ * 80 ms and 10 s closed the gap. So the worker that owns a bank is replaced per
+ * file instead, which is what makes the second file in a queue come out the way
+ * the first one did — and what frees the wasm heap the states hold, roughly 28 MB
+ * for the first and 11 MB for each after it.
+ *
+ * `tests/integration/real-denoise.test.ts` measures both halves of that: that a
+ * fresh bank reproduces a run exactly, and that a used one does not.
  */
 export class DeepFilterBank {
   /** Samples the model consumes and emits per call — 480 at 48 kHz. */
@@ -58,6 +64,7 @@ export class DeepFilterBank {
   private readonly states: number[] = []
   private readonly model: Uint8Array
   private options: DenoiseOptions
+  private prepared = false
 
   /**
    * Frames its output lags its input by, for the settings it is prepared with.
@@ -95,13 +102,30 @@ export class DeepFilterBank {
   }
 
   /**
-   * Readies the bank for a job: applies the options, makes sure a state exists
-   * per channel, and clears whatever the previous job left behind.
+   * Readies the bank for its one job: applies the options and makes sure a state
+   * exists per channel.
+   *
+   * A second call throws. The states cannot be returned to their initial
+   * condition (see the note on this class), so reusing a bank would render a file
+   * differently from the way a fresh run renders it, quietly.
+   *
+   * The options are assigned before any state is created, so a state created here
+   * is born with this job's attenuation limit rather than the one the bank was
+   * loaded with. That limit and the post-filter beta are plain settings on a state
+   * that has processed nothing, which is why a state created at load time and
+   * re-pointed here matches one created with these options to begin with — the
+   * integration suite measures that, since warming the model up before a job
+   * arrives depends on it.
    */
   prepare(channels: number, options: DenoiseOptions): void {
     if (!Number.isInteger(channels) || channels < 1 || channels > DENOISE_MAX_CHANNELS) {
       throw new Error(`Denoising supports 1 to ${DENOISE_MAX_CHANNELS} channels, not ${channels}`)
     }
+    if (this.prepared) {
+      throw new Error('A DeepFilterNet3 bank serves one job; this one has already been used')
+    }
+    this.prepared = true
+    this.options = clampOptions(options)
 
     while (this.states.length < channels) {
       const state = df_create(this.model, this.options.attenuationLimitDb)
@@ -109,12 +133,10 @@ export class DeepFilterBank {
       this.states.push(state)
     }
 
-    this.options = clampOptions(options)
     for (const state of this.states) {
       df_set_atten_lim(state, this.options.attenuationLimitDb)
       df_set_post_filter_beta(state, this.options.postFilterBeta)
     }
-    this.reset(channels)
   }
 
   /**
@@ -130,19 +152,4 @@ export class DeepFilterBank {
     // The returned view aliases wasm memory and dies on the next call.
     return Float32Array.from(df_process_frame(state, frame))
   }
-
-  /** Pushes silence through each state so no history crosses into the next job. */
-  private reset(channels: number): void {
-    const silence = new Float32Array(this.frameLength)
-    for (let channel = 0; channel < channels; channel++) {
-      for (let frame = 0; frame < FLUSH_FRAMES; frame++) {
-        df_process_frame(this.states[channel] as number, silence)
-      }
-    }
-  }
-}
-
-function clamp(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min
-  return Math.min(max, Math.max(min, value))
 }

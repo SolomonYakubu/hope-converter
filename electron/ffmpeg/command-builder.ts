@@ -6,6 +6,7 @@ import type {
   VideoConversionOptions,
   VideoPreset
 } from '../types/conversion'
+import { assertPath } from '../utils/guards'
 
 const VIDEO_CODECS = new Set<VideoCodec>([
   'libx264', 'libx265', 'libvpx-vp9', 'copy',
@@ -162,11 +163,6 @@ function vp9CpuUsed(preset: VideoPreset): number {
     veryslow: 1
   }
   return speedByPreset[preset]
-}
-
-function assertPath(value: string, label: string): void {
-  if (!value.trim()) throw new Error(`${label} cannot be empty`)
-  if (value.includes('\u0000')) throw new Error(`${label} contains an invalid character`)
 }
 
 function assertAllowed<T>(allowed: ReadonlySet<T>, value: T, label: string): void {

@@ -6,31 +6,25 @@ import {
   type DenoiseAudioFormat,
   type DenoiseKind
 } from '../types/denoise'
-
-const AUDIO_ENCODERS: Record<DenoiseAudioFormat, { codec: string; lossy: boolean }> = {
-  wav: { codec: 'pcm_s16le', lossy: false },
-  flac: { codec: 'flac', lossy: false },
-  mp3: { codec: 'libmp3lame', lossy: true },
-  m4a: { codec: 'aac', lossy: true }
-}
+import { assertPath } from '../utils/guards'
+// The container table lives in `containers.ts` because the panel consults it too:
+// it has to name the streams a given container cannot carry before a job runs.
+import { videoContainerForExtension, type VideoContainer } from './containers'
 
 /**
- * How each video container is rebuilt. The video stream is always copied, never
- * re-encoded, so the audio codec has to be one the container accepts.
+ * How each audio format is written.
  *
- * Containers that mux modern audio poorly (AVI, FLV, WMV) are written to
- * Matroska instead — still a straight copy of the original video, just in a
- * wrapper that takes AAC without complaint.
+ * The model hands over 32-bit floats, so the lossless pair is written at the
+ * deepest the two formats hold: 24-bit. `pcm_s24le` for WAV, and `s32` for FLAC —
+ * FFmpeg's FLAC encoder takes only s16 or s32 and stores s32 input as 24-bit, so
+ * asking for it explicitly pins the depth rather than leaving it to whatever the
+ * bundled build's format negotiation prefers.
  */
-const VIDEO_CONTAINERS: Record<string, { extension: string; codec: string }> = {
-  mp4: { extension: 'mp4', codec: 'aac' },
-  m4v: { extension: 'm4v', codec: 'aac' },
-  mov: { extension: 'mov', codec: 'aac' },
-  mkv: { extension: 'mkv', codec: 'aac' },
-  webm: { extension: 'webm', codec: 'libopus' },
-  avi: { extension: 'mkv', codec: 'aac' },
-  flv: { extension: 'mkv', codec: 'aac' },
-  wmv: { extension: 'mkv', codec: 'aac' }
+const AUDIO_ENCODERS: Record<DenoiseAudioFormat, { codec: string; lossy: boolean; sampleFormat?: string }> = {
+  wav: { codec: 'pcm_s24le', lossy: false },
+  flac: { codec: 'flac', lossy: false, sampleFormat: 's32' },
+  mp3: { codec: 'libmp3lame', lossy: true },
+  m4a: { codec: 'aac', lossy: true }
 }
 
 export interface DecodeArgsOptions {
@@ -130,8 +124,13 @@ function buildReadArgs(options: DecodeArgsOptions): string[] {
 }
 
 /**
- * Takes denoised float samples on stdin and writes the finished file. For video
- * the original is read alongside so its picture is copied through untouched.
+ * Takes denoised float samples on stdin and writes the finished file.
+ *
+ * For video the original is read alongside as input 1, and everything the target
+ * container can legally hold is copied from it: every video stream, the chapters,
+ * the tags, and — into Matroska only — the other audio tracks, the subtitles and the
+ * attachments. Only the denoised soundtrack is encoded; see
+ * {@link VideoContainer.carriesAnything} for why the other containers take less.
  */
 export function buildEncodeArgs(options: EncodeArgsOptions): string[] {
   assertPath(options.outputPath, 'output path')
@@ -153,18 +152,41 @@ export function buildEncodeArgs(options: EncodeArgsOptions): string[] {
     assertPath(options.originalPath, 'original path')
 
     const container = videoContainerFor(options.outputPath)
+    const bitrate = bitrateArg(options.audioBitrateKbps)
+
+    // Every video stream rather than just the first, and the chapter list, which
+    // `-map_metadata` does not carry.
     args.push(
       '-i', options.originalPath,
-      '-map', '1:v:0', '-map', '0:a:0',
-      '-map_metadata', '1',
-      '-c:v', 'copy'
+      '-map', '1:v',
+      '-map', '0:a:0'
     )
-    // Only the soundtrack is filtered; the picture is still a straight copy.
-    if (filterChain) args.push('-af', filterChain)
-    args.push(
-      '-c:a', container.codec,
-      '-b:a', `${audioBitrate(options.audioBitrateKbps)}k`
-    )
+
+    if (container.carriesAnything) {
+      // The original's remaining audio tracks, minus the one the denoised stream
+      // replaces. `?` keeps a source with nothing to add from failing the mux.
+      args.push(
+        '-map', '1:a?',
+        '-map', '-1:a:0',
+        '-map', '1:s?',
+        '-map', '1:t?'
+      )
+    }
+
+    args.push('-map_metadata', '1', '-map_chapters', '1', '-c:v', 'copy')
+
+    if (container.carriesAnything) {
+      args.push('-c:s', 'copy', '-c:t', 'copy')
+      // The denoised track is output audio 0 because it is mapped first, so the
+      // per-stream forms name it while the carried tracks stay a straight copy.
+      if (filterChain) args.push('-filter:a:0', filterChain)
+      args.push('-c:a', 'copy', '-c:a:0', container.codec, '-b:a:0', bitrate)
+    } else {
+      // Only the soundtrack is filtered; the picture is still a straight copy.
+      if (filterChain) args.push('-af', filterChain)
+      args.push('-c:a', container.codec, '-b:a', bitrate)
+    }
+
     if (container.extension === 'mp4' || container.extension === 'm4v' || container.extension === 'mov') {
       args.push('-movflags', '+faststart')
     }
@@ -177,15 +199,19 @@ export function buildEncodeArgs(options: EncodeArgsOptions): string[] {
 
   if (filterChain) args.push('-af', filterChain)
   args.push('-c:a', encoder.codec)
-  if (encoder.lossy) args.push('-b:a', `${audioBitrate(options.audioBitrateKbps)}k`)
+  if (encoder.sampleFormat) args.push('-sample_fmt', encoder.sampleFormat)
+  if (encoder.lossy) args.push('-b:a', bitrateArg(options.audioBitrateKbps))
   return [...args, options.outputPath]
 }
 
-/** Writes a plain 16-bit WAV, used for the untouched half of the A/B preview. */
+/**
+ * Writes a 24-bit WAV, used for the untouched half of the A/B preview. The same
+ * depth the cleaned half is written at, so the pair differs only in the denoising.
+ */
 export function buildPreviewExtractArgs(options: DecodeArgsOptions & { outputPath: string }): string[] {
   assertPath(options.outputPath, 'output path')
   // Same read as the model gets, but written as a WAV the renderer's <audio> plays.
-  return [...buildReadArgs(options), '-c:a', 'pcm_s16le', options.outputPath]
+  return [...buildReadArgs(options), '-c:a', 'pcm_s24le', options.outputPath]
 }
 
 /**
@@ -204,9 +230,9 @@ export function denoisedExtension(
   return videoContainerFor(inputPath).extension
 }
 
-function videoContainerFor(path: string): { extension: string; codec: string } {
+function videoContainerFor(path: string): VideoContainer {
   const extension = extname(path).slice(1).toLowerCase()
-  const container = VIDEO_CONTAINERS[extension]
+  const container = videoContainerForExtension(extension)
   if (!container) throw new Error(`Denoising does not support the ${extension || 'unknown'} container`)
   return container
 }
@@ -217,6 +243,10 @@ function audioBitrate(bitrateKbps: number | undefined): number {
     throw new Error('audio bitrate must be an integer between 32 and 512')
   }
   return bitrate
+}
+
+function bitrateArg(bitrateKbps: number | undefined): string {
+  return `${audioBitrate(bitrateKbps)}k`
 }
 
 // Fixed notation keeps a value like 1e-7 out of the argument list.
@@ -230,9 +260,4 @@ function assertSeconds(value: number, label: string): void {
 
 function assertChannels(channels: number): void {
   if (channels !== 1 && channels !== 2) throw new Error('channels must be 1 or 2')
-}
-
-function assertPath(value: string, label: string): void {
-  if (!value.trim()) throw new Error(`${label} cannot be empty`)
-  if (value.includes('\u0000')) throw new Error(`${label} contains an invalid character`)
 }

@@ -1,4 +1,5 @@
 import type { ConversionOptions, MediaKind, VideoCodec } from '../../electron/types/conversion'
+import { classifyMedia } from '../../electron/utils/media-kind'
 import type { OutputFormats, QualityPreset } from '../stores/conversion-store'
 import type { InputFile } from '../types/hope-converter'
 
@@ -15,19 +16,11 @@ export const FORMAT_OPTIONS: Record<MediaKind, readonly { value: string; label: 
   ]
 }
 
-export function classifyDroppedFile(file: File): MediaKind | null {
-  const extension = file.name.split('.').pop()?.toLowerCase()
-  if (['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'flv', 'wmv'].includes(extension ?? '')) return 'video'
-  if (['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'opus', 'wma'].includes(extension ?? '')) return 'audio'
-  if (['jpg', 'jpeg', 'png', 'webp', 'heic', 'tif', 'tiff', 'bmp', 'gif'].includes(extension ?? '')) return 'image'
-  return null
-}
-
 export function createInputFileFromDrop(
   file: File,
   getPathForFile: (file: File) => string
 ): InputFile | null {
-  const kind = classifyDroppedFile(file)
+  const kind = classifyMedia(file.name)
   if (!kind) return null
 
   const path = getPathForFile(file).trim()
